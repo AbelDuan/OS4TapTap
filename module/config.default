@@ -2,6 +2,11 @@ TAP_CMD input keyevent 120
 HOLD_CMD am start-foreground-service -a android.intent.action.ASSIST -n com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService --es voice_assist_start_from_key three_gesture_up
 DOUBLE_CMD 
 TAP_MAX_MS 800
+QUIET_MS 250
+STORM_MIN_EDGES 4
+STORM_SPAN_MS 700
+SETTLE_MS 700
+QUIET_MS 250
 HOLD_MS 1500
 MAX_HOLD_MS 3000
 DOUBLE_MS 400

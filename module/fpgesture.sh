@@ -23,10 +23,12 @@ SHARE_DIR=/data/adb/fpgesture
 
 TAP_CMD=""; HOLD_CMD=""; DOUBLE_CMD=""
 TAP_MAX_MS=800; HOLD_MS=1500; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800; POLL=0.05
+QUIET_MS=250; STORM_MIN_EDGES=4; STORM_SPAN_MS=700; SETTLE_MS=700
 TAP_LOCKED=0; HOLD_LOCKED=0; DOUBLE_LOCKED=0; NATIVE_DOUBLE=keep; prev_native=
 
 DRY=0; EV=""
 touching=0; down_ms=0; pending=0; suppress=0; in_suppress=0; swallow_up=0
+last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; double_armed=0
 ct_locked=0; last_count=0; stat_edges=0; stat_acts=0
 
 load() {
@@ -44,6 +46,10 @@ load() {
       DOUBLE_MS)     DOUBLE_MS=${val:-400} ;;
       SUPPRESS_MS)   SUPPRESS_MS=${val:-800} ;;
       POLL)          POLL=${val:-0.05} ;;
+      QUIET_MS)      QUIET_MS=${val:-250} ;;
+      STORM_MIN_EDGES) STORM_MIN_EDGES=${val:-4} ;;
+      STORM_SPAN_MS) STORM_SPAN_MS=${val:-700} ;;
+      SETTLE_MS)     SETTLE_MS=${val:-700} ;;
       TAP_LOCKED)    TAP_LOCKED=${val:-0} ;;
       HOLD_LOCKED)   HOLD_LOCKED=${val:-0} ;;
       DOUBLE_LOCKED) DOUBLE_LOCKED=${val:-0} ;;
@@ -75,14 +81,43 @@ fire() { # fire <cmd> <name>
 edge() { # edge <now_ms> - one IRQ edge toggles the touch state
   t=$1
   stat_edges=$(( stat_edges + 1 ))
+  gap=$(( t - last_edge ))
+  [ "$last_edge" = 0 ] && gap=999999
+  # --- 风暴过滤：密集边沿持续过久 = 指纹认证/扫描，不是人手势 ---
+  if [ "$gap" -lt "$QUIET_MS" ]; then
+    [ "$burst_start" = 0 ] && burst_start=$t
+    burst_edges=$(( burst_edges + 1 ))
+    if [ "$storm" = 0 ] && [ "$burst_edges" -ge "$STORM_MIN_EDGES" ] && [ $(( t - burst_start )) -ge "$STORM_SPAN_MS" ]; then
+      storm=1; touching=0; pending=0; double_armed=0
+      log "storm: ${burst_edges} edges over $(( t - burst_start ))ms (auth/scan?) - suppressing"
+    fi
+  else
+    # 串结束 → 结算延迟的双击（串内判成风暴的，这里已清零，不会结算）
+    if [ "$double_armed" != 0 ]; then
+      double_armed=0
+      if [ "$storm" = 1 ]; then log "double cancelled (storm)"
+      elif [ "$ct_locked" = 1 ] && [ "$DOUBLE_LOCKED" != 1 ]; then log "double ignored (locked)"
+      else log "double tap"; fire "$DOUBLE_CMD" double; fi
+    fi
+    [ "$storm" = 1 ] && { storm=0; log "storm ended"; }
+    burst_start=0; burst_edges=1
+  fi
+  last_edge=$t
+  [ "$storm" = 1 ] && return
+  # --- 失配安全网：吞掉强制复位后的第一个边沿（否则抬起会被当成按下） ---
+  [ "$swallow_next" = 1 ] && { swallow_next=0; log "swallowed edge after reset"; return; }
+  # --- 按下门槛：必须前一段安静，否则是余波/伪边沿 ---
+  if [ "$touching" = 0 ] && [ "$gap" -lt "$QUIET_MS" ] && [ "$pending" = 0 ]; then
+    log "spurious edge (gap ${gap}ms) ignored"
+    return
+  fi
   if [ "$touching" = 0 ]; then
     touching=1; down_ms=$t; in_suppress=0
     [ "$suppress" != 0 ] && [ "$t" -lt "$suppress" ] && { in_suppress=1; return; }
     ct_locked=$(keyguard_locked)
     if [ "$pending" != 0 ]; then
-      pending=0; suppress=$(( t + SUPPRESS_MS )); swallow_up=1
-      if [ "$ct_locked" = 1 ] && [ "$DOUBLE_LOCKED" != 1 ]; then log "double ignored (locked)"
-      else log "double tap"; fire "$DOUBLE_CMD" double; fi
+      pending=0; suppress=$(( t + SUPPRESS_MS )); swallow_up=1; double_armed=$t
+      log "double armed (settle at burst end)"
     else
       swallow_up=0
     fi
@@ -108,6 +143,16 @@ sample() { # sample <irq_count> <now_ms>
   cnt=$1; t=$2
   delta=$(( cnt - last_count )); last_count=$cnt
   while [ "$delta" -gt 0 ]; do edge "$t"; delta=$(( delta - 1 )); done
+  if [ "$double_armed" != 0 ] && [ $(( t - double_armed )) -ge "$SETTLE_MS" ]; then
+    double_armed=0
+    if [ "$storm" = 1 ]; then log "double cancelled (storm)"
+    elif [ "$ct_locked" = 1 ] && [ "$DOUBLE_LOCKED" != 1 ]; then log "double ignored (locked)"
+    else log "double tap"; fire "$DOUBLE_CMD" double; fi
+  fi
+  if [ "$touching" = 1 ] && [ $(( t - down_ms )) -gt $(( MAX_HOLD_MS + 500 )) ]; then
+    log "state reset: down for $(( t - down_ms ))ms with no release (desync guard)"
+    touching=0; pending=0; swallow_next=1
+  fi
   if [ "$pending" != 0 ] && [ $(( t - pending )) -ge "$DOUBLE_MS" ]; then
     pending=0
     if [ "$ct_locked" = 1 ] && [ "$TAP_LOCKED" != 1 ]; then log "single tap ignored (locked)"
@@ -168,7 +213,8 @@ replay() {
 selftest() {
   DRY=1; ok=0; bad=0
   chk() { if [ "$2" = "$3" ]; then ok=$((ok+1)); else bad=$((bad+1)); echo "FAIL want='$2' got='$3'"; fi; }
-  rst() { EV=""; touching=0; down_ms=0; pending=0; suppress=0; in_suppress=0; swallow_up=0; ct_locked=0; last_count=0; STUB_LOCKED=0; }
+  rst() { EV=""; touching=0; down_ms=0; pending=0; suppress=0; in_suppress=0; swallow_up=0
+last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; double_armed=0; ct_locked=0; last_count=0; STUB_LOCKED=0; }
   keyguard_locked() { echo "$STUB_LOCKED"; }
   TAP_CMD=x; HOLD_CMD=x; DOUBLE_CMD=x
   TAP_MAX_MS=800; HOLD_MS=1500; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800
@@ -185,6 +231,15 @@ selftest() {
 
   rst; sample 0 12000; sample 1 12020; sample 2 13020; sample 2 13500
   chk "dead zone ignored" "" "$EV"
+
+  # 现象①：认证风暴（密集且持续 >1.2s）→ 完全抑制，不得打出幻影双击
+  rst; i=0; while [ $i -lt 12 ]; do sample $((i+1)) $((30000 + i*150)); i=$((i+1)); done
+  chk "auth storm suppressed" "" "$EV"
+
+  # 现象②：风暴之后，两次相隔 2s 的点按必须各算一次轻触（不得被判成长按）
+  sample 13 32000; sample 14 32300; sample 14 34300
+  sample 15 36000; sample 16 36300; sample 16 38300
+  chk "two taps after storm stay taps" "tap tap " "$EV"
 
   rst; sample 1 6000; sample 2 6060; sample 3 6120; sample 4 6180; sample 4 7000
   chk "double" "double " "$EV"
