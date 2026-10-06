@@ -1,6 +1,6 @@
 id=fpgesture
 name=指纹键手势 (Fingerprint Gesture)
-version=v1.2
-versionCode=120
+version=v1.3
+versionCode=130
 author=DSH-Folk agent (AbelDuan)
 description=侧边指纹键手势 → 自定义动作：轻触/长按/双击，可分别设定「锁屏是否生效」，长按超过上限判为误触不响应。带 WebUI 配置界面（点击本模块的「打开」按钮）。

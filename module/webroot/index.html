@@ -127,6 +127,7 @@ const PRESETS = {
   volup:         () => 'input keyevent 24',
   voldown:       () => 'input keyevent 25',
   camera:        () => 'am start -a android.media.action.STILL_IMAGE_CAMERA',
+  search:        () => 'am start -a android.search.action.GLOBAL_SEARCH -c android.intent.category.DEFAULT',
   assistant:     () => 'am start-foreground-service -a android.intent.action.ASSIST -n com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService',
   aimem:         () => 'am start-foreground-service -a android.intent.action.ASSIST -n com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService --es voice_assist_start_from_key three_gesture_up',  // 与三指上滑同款（实测 showRecognitionIsland）
   xiaoi:         v => (v ? 'am start-foreground-service -a android.intent.action.ASSIST -n com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService --es text ' + v.replace(/"/g, '\\"') + '"' : ''),
@@ -136,7 +137,7 @@ const PRESETS = {
 const ACTIONS = [
   ['none','不执行动作'],['torch','手电筒 开/关'],['screenshot','截屏'],['home','回桌面'],['back','返回'],
   ['notifications','下拉通知栏'],['playpause','播放/暂停'],['next','下一首'],['prev','上一首'],
-  ['volup','音量 +'],['voldown','音量 -'],['camera','打开相机'],['app','打开指定应用'],['custom','自定义命令'],
+  ['volup','音量 +'],['voldown','音量 -'],['camera','打开相机'],['search','搜索（全局搜索）'],['app','打开指定应用'],['custom','自定义命令'],
   ['assistant','小爱同学（助手·语音）'],['aimem','小爱记忆（直接记忆·三指同款）'],['xiaoi','小爱指令（自定义文本）'],
 ];
 const ACTIONS_FOR = k => k === 'double' ? ACTIONS : ACTIONS.filter(a => a[0] !== 'aimemory');
