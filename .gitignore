@@ -1,0 +1,8 @@
+*.apk
+*.jar
+*.log
+*.pid
+config
+ui-state.json
+packages.txt
+__pycache__/

@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<link rel="stylesheet" href="/internal/insets.css">
+<title>指纹键手势</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; padding: 14px 12px calc(28px + var(--window-inset-bottom, 0px));
+         background: #14161a; color: #e8eaed;
+         font: 15px/1.5 -apple-system,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;
+         overflow-x: hidden; }
+  h1 { font-size: 18px; margin: 0 0 2px; }
+  .sub { color: #9aa0a6; font-size: 12.5px; margin-bottom: 12px; }
+  .card { background: #1e2126; border: 1px solid #2c3138; border-radius: 14px; padding: 12px; margin-bottom: 10px; }
+  .card h2 { font-size: 15px; margin: 0 0 6px; display: flex; align-items: center; gap: 8px; }
+  .badge { font-size: 11px; color: #8ab4f8; border: 1px solid #33507f; border-radius: 6px; padding: 1px 6px; font-weight: 400; }
+  .badge.ok { color: #6ee7a8; border-color: #2f6b4a; }
+  .badge.bad { color: #ff9a8b; border-color: #7a3a33; }
+  label { display: block; font-size: 12.5px; color: #9aa0a6; margin: 8px 0 4px; }
+  input[type=text], input[type=number] {
+    width: 100%; padding: 11px 12px; font-size: 15px; color: #e8eaed; background: #14161a;
+    border: 1px solid #353b44; border-radius: 10px; }
+  .row { display: flex; gap: 10px; } .row > div { flex: 1; }
+  .chk { display: flex; align-items: center; gap: 9px; margin-top: 10px; font-size: 14px; }
+  .chk input { width: 20px; height: 20px; }
+  button { width: 100%; padding: 14px; font-size: 16px; font-weight: 600; border: 0; border-radius: 12px;
+           background: #8ab4f8; color: #10131a; margin-top: 6px; }
+  button.ghost { background: #2c3138; color: #e8eaed; font-weight: 400; padding: 11px; font-size: 14px; }
+  button.pick { text-align: left; background: #14161a; border: 1px solid #353b44; color: #e8eaed;
+                font-weight: 400; font-size: 15px; padding: 11px 12px; display: flex; justify-content: space-between; align-items: center; }
+  button.pick:after { content: "▾"; color: #9aa0a6; }
+  pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.45; background: #0f1115;
+        border: 1px solid #262b32; border-radius: 10px; padding: 10px; max-height: 240px; overflow: auto; margin: 0; }
+  .note { font-size: 12px; color: #9aa0a6; margin-top: 8px; }
+  .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 30px; background: #8ab4f8; color: #10131a;
+           padding: 10px 18px; border-radius: 10px; font-size: 14px; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 100; }
+  .toast.on { opacity: 1; }
+  .toast.err { background: #ff9a8b; }
+  /* 自绘选择面板：不用原生 select/datalist（它们由 WebView 渲染，样式不可控且会闪） */
+  #mask { position: fixed; inset: 0; background: rgba(0,0,0,.55); opacity: 0; pointer-events: none;
+          transition: opacity .18s; z-index: 90; }
+  #mask.on { opacity: 1; pointer-events: auto; }
+  #sheet { position: fixed; left: 0; right: 0; bottom: 0; max-height: 72vh; display: flex; flex-direction: column;
+           background: #1b1f25; border-top: 1px solid #2f353d; border-radius: 18px 18px 0 0;
+           transform: translateY(101%); transition: transform .22s ease-out; z-index: 95;
+           padding-bottom: var(--window-inset-bottom, 0px); }
+  #sheet.on { transform: translateY(0); }
+  #sh-head { padding: 14px 16px 8px; font-size: 15px; font-weight: 600; display: flex; justify-content: space-between; }
+  #sh-head span.x { color: #9aa0a6; font-weight: 400; }
+  #sh-filter { margin: 0 14px 8px; }
+  #sh-list { overflow: auto; padding: 0 8px 12px; -webkit-overflow-scrolling: touch; }
+  .opt { padding: 13px 14px; border-radius: 10px; font-size: 15px; }
+  .opt:active { background: #262b32; }
+  .opt.sel { color: #8ab4f8; font-weight: 600; }
+  .opt small { color: #9aa0a6; font-weight: 400; }
+</style>
+</head>
+<body>
+<h1>指纹键手势 <span class="badge" id="st">检测中…</span></h1>
+<div class="sub">侧边指纹键：轻触 / 长按 / 双击 → 自定义动作 · 改动约 2 秒生效</div>
+
+<div id="cards"></div>
+
+<div class="card">
+  <h2>判定参数</h2>
+  <div class="row">
+    <div><label>轻触/长按分界 (ms)</label><input id="holdMs" type="number" min="200" max="5000" step="50"></div>
+    <div><label>长按上限 (ms)</label><input id="maxHoldMs" type="number" min="500" max="10000" step="100"></div>
+  </div>
+  <label>双击窗口 (ms)</label><input id="doubleMs" type="number" min="150" max="900" step="50">
+  <div class="note">按住超过「长按上限」判为误触，不执行动作——误触时多按一会儿再松手即可取消。</div>
+</div>
+
+<button id="save">保存并生效</button>
+<button class="ghost" id="restart">重启守护进程</button>
+
+<div class="card" style="margin-top:12px">
+  <h2>最近识别 <span class="badge">每 2 秒刷新</span></h2>
+  <pre id="log">加载中…</pre>
+  <button class="ghost" id="clear">清空日志</button>
+</div>
+
+<div class="card">
+  <h2>生成的配置 <button class="ghost" id="showCfg" style="width:auto;padding:4px 10px;margin:0">显示</button></h2>
+  <pre id="cfg" style="display:none"></pre>
+  <div class="note">守护进程实际读取的内容（/data/adb/fpgesture/config）。</div>
+</div>
+
+<div id="mask"></div>
+<div id="sheet">
+  <div id="sh-head"><b id="sh-title">选择</b><span class="x" id="sh-close">关闭</span></div>
+  <input id="sh-filter" type="text" placeholder="搜索…" style="display:none">
+  <div id="sh-list"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ---------- KernelSU WebUI bridge（KSU v3.x 回调式） ---------- */
+let cbN = 0;
+function sh(cmd, opts) {
+  return new Promise((resolve, reject) => {
+    if (typeof ksu === 'undefined' || !ksu.exec) return reject(new Error('no ksu bridge'));
+    const name = 'fpg_cb_' + Date.now() + '_' + (cbN++);
+    window[name] = (errno, stdout, stderr) => { delete window[name]; resolve({ errno: errno, stdout: stdout || '', stderr: stderr || '' }); };
+    try { ksu.exec(cmd, JSON.stringify(opts || {}), name); } catch (e) { delete window[name]; reject(e); }
+  });
+}
+const DIR = '/data/adb/fpgesture', CONF = DIR + '/config', LOGF = DIR + '/events.log', PKGS = DIR + '/packages.txt';
+const LED = 'b=$(cat /sys/class/leds/white:flash/brightness 2>/dev/null); [ "${b:-0}" -gt 0 ] && echo 0 > /sys/class/leds/white:flash/brightness || echo 255 > /sys/class/leds/white:flash/brightness';
+const PRESETS = {
+  none:          () => '',
+  torch:         () => LED,
+  screenshot:    () => 'input keyevent 120',
+  home:          () => 'input keyevent 3',
+  back:          () => 'input keyevent 4',
+  notifications: () => 'cmd statusbar expand-notifications',
+  playpause:     () => 'input keyevent 85',
+  next:          () => 'input keyevent 87',
+  prev:          () => 'input keyevent 88',
+  volup:         () => 'input keyevent 24',
+  voldown:       () => 'input keyevent 25',
+  camera:        () => 'am start -a android.media.action.STILL_IMAGE_CAMERA',
+  assistant:     () => 'am start-foreground-service -a android.intent.action.ASSIST -n com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService',
+  aimem:         () => 'am start-foreground-service -a android.intent.action.ASSIST -n com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService --es voice_assist_start_from_key three_gesture_up',  // 与三指上滑同款（实测 showRecognitionIsland）
+  xiaoi:         v => (v ? 'am start-foreground-service -a android.intent.action.ASSIST -n com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService --es text ' + v.replace(/"/g, '\\"') + '"' : ''),
+  app:           v => (v ? 'monkey -p ' + v + ' -c android.intent.category.LAUNCHER 1' : ''),
+  custom:        v => (v || ''),
+};
+const ACTIONS = [
+  ['none','不执行动作'],['torch','手电筒 开/关'],['screenshot','截屏'],['home','回桌面'],['back','返回'],
+  ['notifications','下拉通知栏'],['playpause','播放/暂停'],['next','下一首'],['prev','上一首'],
+  ['volup','音量 +'],['voldown','音量 -'],['camera','打开相机'],['app','打开指定应用'],['custom','自定义命令'],
+  ['assistant','小爱同学（助手）'],['aimemory','小爱同学（系统原生双击）'],
+];
+const ACTIONS_FOR = k => k === 'double' ? ACTIONS : ACTIONS.filter(a => a[0] !== 'aimemory');
+const LABEL = Object.fromEntries(ACTIONS);
+const GESTURES = [
+  { k:'tap', name:'轻触', hint:'短碰一下' },
+  { k:'hold', name:'长按', hint:'按住到分界值以上、上限以内' },
+  { k:'double', name:'双击', hint:'快速连碰两下' },
+];
+const COMMON = ['com.tencent.mm','com.eg.android.AlipayGphone','com.android.camera','com.android.settings',
+  'com.android.chrome','com.ss.android.ugc.aweme','tv.danmaku.bili','com.tencent.mobileqq','com.taobao.taobao',
+  'com.xingin.xhs','com.miui.notes','top.funcun.dshfolk'];
+let S = null, PK = [];
+const $ = id => document.getElementById(id);
+function toast(m, bad) { const t = $('toast'); t.textContent = m; t.className = 'toast on' + (bad ? ' err' : ''); setTimeout(() => t.className = 'toast', 1800); }
+
+/* ---------- 自绘选择面板 ---------- */
+let sheetCB = null;
+function openSheet(title, items, onPick, opts) {
+  opts = opts || {};
+  $('sh-title').textContent = title;
+  const f = $('sh-filter');
+  f.style.display = opts.filter ? 'block' : 'none'; f.value = '';
+  const draw = kw => {
+    const list = items.filter(it => !kw || (it.label + ' ' + (it.sub || '')).toLowerCase().indexOf(kw.toLowerCase()) >= 0);
+    $('sh-list').innerHTML = list.map(it => {
+      const sel = opts.selected === it.value ? ' sel' : '';
+      const sub = it.sub ? ' <small>' + it.sub + '</small>' : '';
+      return '<div class="opt' + sel + '" data-v="' + encodeURIComponent(it.value) + '">' + it.label + sub + '</div>';
+    }).join('') || '<div class="opt">（无匹配）</div>';
+  };
+  draw('');
+  $('sh-list').onclick = e => {
+    const d = e.target.closest ? e.target.closest('.opt') : null;
+    if (!d || d.dataset.v === undefined) return;
+    const v = decodeURIComponent(d.dataset.v);
+    const it = items.filter(x => x.value === v)[0];
+    closeSheet(); if (it && onPick) onPick(it);
+  };
+  f.oninput = () => draw(f.value);
+  $('mask').className = 'on'; $('sheet').className = 'on';
+}
+function closeSheet() { $('mask').className = ''; $('sheet').className = ''; sheetCB = null; }
+$('mask').onclick = closeSheet; $('sh-close').onclick = closeSheet;
+
+/* ---------- 配置解析/生成（与守护进程同一格式：KEY value 一行一个） ---------- */
+function parseCfg(txt) {
+  const kv = {};
+  for (const line of (txt || '').split('\n')) {
+    const i = line.indexOf(' ');
+    if (i < 0) kv[line.trim()] = ''; else kv[line.slice(0, i)] = line.slice(i + 1);
+  }
+  const guess = cmd => {
+    cmd = (cmd || '').trim();
+    if (!cmd) return { type:'none', value:'' };
+    if (cmd === LED) return { type:'torch', value:'' };
+    for (const a of ACTIONS) { const t = a[0];
+      if (t === 'torch' || t === 'none' || t === 'app' || t === 'custom') continue;
+      if (PRESETS[t]('') === cmd) return { type:t, value:'' }; }
+    const m = cmd.match(/^monkey -p (\S+) -c android\.intent\.category\.LAUNCHER 1$/);
+    if (m) return { type:'app', value:m[1] };
+    return { type:'custom', value:cmd };
+  };
+  const g = k => Object.assign(guess(kv[k.toUpperCase() + '_CMD']), { locked: kv[k.toUpperCase() + '_LOCKED'] === '1' });
+  return {
+    tap: g('tap'), hold: g('hold'), double: g('double'),
+    holdMs: +kv.HOLD_MS || 1400, maxHoldMs: +kv.MAX_HOLD_MS || 3000, doubleMs: +kv.DOUBLE_MS || 400,
+  };
+}
+function buildCfg(s) {
+  const cmd = g => (PRESETS[g.type] || PRESETS.none)((g.value || '').trim());
+  return [
+    'TAP_CMD ' + cmd(s.tap),
+    'HOLD_CMD ' + cmd(s.hold),
+    'DOUBLE_CMD ' + cmd(s.double),
+    'HOLD_MS ' + s.holdMs,
+    'MAX_HOLD_MS ' + s.maxHoldMs,
+    'DOUBLE_MS ' + s.doubleMs,
+    'SUPPRESS_MS 800',
+    'POLL 0.05',
+    'TAP_LOCKED ' + (s.tap.locked ? 1 : 0),
+    'HOLD_LOCKED ' + (s.hold.locked ? 1 : 0),
+    'DOUBLE_LOCKED ' + (s.double.locked ? 1 : 0),
+    'NATIVE_DOUBLE ' + (s.double.type === 'none' ? 'torch' : 'off'),
+  ].join('\n') + '\n';
+}
+const b64 = s => {                       // UTF-8 字节直接 base64（设备侧只做 base64 -d）
+  const bytes = new TextEncoder().encode(s); let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+};
+
+/* ---------- 渲染 ---------- */
+function render() {
+  $('cards').innerHTML = GESTURES.map(g => `
+    <div class="card">
+      <h2>${g.name} <span class="badge">${g.hint}</span></h2>
+      <label>动作</label>
+      <button type="button" class="pick" id="pk_${g.k}"></button>
+      <div id="ex_${g.k}" style="display:none">
+        <label id="lb_${g.k}">参数</label>
+        <input type="text" id="val_${g.k}">
+        <button type="button" class="ghost" id="sel_${g.k}" style="display:none">从已安装应用中选择</button>
+      </div>
+      <div class="chk"><input type="checkbox" id="lk_${g.k}"><span>锁屏时也生效</span></div>
+    </div>`).join('');
+  for (const g of GESTURES) {
+    const k = g.k;
+    $('pk_' + k).onclick = () => openSheet('选择「' + g.name + '」的动作',
+      ACTIONS_FOR(k).map(a => ({ label:a[1], value:a[0] })), it => { S[k].type = it.value; sync(); },
+      { selected: S[k].type });
+    $('val_' + k).oninput = e => { S[k].value = e.target.value; };
+    $('lk_' + k).onchange = e => { S[k].locked = e.target.checked; };
+    $('sel_' + k).onclick = () => openSheet('选择应用',
+      (PK.length ? PK : COMMON).map(p => ({ label:p, value:p })), it => { S[k].value = it.value; $('val_' + k).value = it.value; },
+      { filter: true, selected: S[k].value });
+  }
+  sync();
+}
+function sync() {
+  for (const g of GESTURES) {
+    const k = g.k, t = S[k].type;
+    $('pk_' + k).textContent = LABEL[t] || '不执行动作';
+    const isParam = (t === 'app' || t === 'custom' || t === 'xiaoi');
+    $('ex_' + k).style.display = isParam ? 'block' : 'none';
+    $('lb_' + k).textContent = t === 'app' ? '应用包名' : (t === 'xiaoi' ? '发给小爱的文本指令' : '自定义 shell 命令');
+    $('val_' + k).placeholder = t === 'app' ? 'com.tencent.mm' : (t === 'xiaoi' ? '记一下 / 打开手电筒' : 'input keyevent 26');
+    if (document.activeElement !== $('val_' + k)) $('val_' + k).value = S[k].value || '';
+    $('sel_' + k).style.display = t === 'app' ? 'block' : 'none';
+    $('lk_' + k).checked = !!S[k].locked;
+  }
+  $('holdMs').value = S.holdMs; $('maxHoldMs').value = S.maxHoldMs; $('doubleMs').value = S.doubleMs;
+  $('cfg').textContent = buildCfg(S);
+}
+async function load() {
+  if (typeof ksu === 'undefined') { $('log').textContent = '⚠️ 请在 KernelSU 管理器的模块页点「打开」进入本界面（普通浏览器拿不到 root 桥）'; return; }
+  const r = await sh('cat ' + CONF + ' 2>/dev/null');
+  S = parseCfg(r.stdout);
+  render();
+  const p = await sh('cat ' + PKGS + ' 2>/dev/null');
+  PK = p.stdout.split('\n').map(x => x.trim()).filter(Boolean);
+  poll(); setInterval(poll, 2000);
+}
+let lastLog = '', lastSt = '';
+async function poll() {
+  const r = await sh('tail -n 40 ' + LOGF + ' 2>/dev/null');
+  const t = r.stdout.trim().split('\n').slice(-40).join('\n') || '（暂无事件）';
+  if (t !== lastLog) { lastLog = t; $('log').textContent = t; $('log').scrollTop = $('log').scrollHeight; }
+  const p = await sh('cat ' + DIR + '/fpgesture.pid 2>/dev/null');
+  const pid = p.stdout.trim();
+  const alive = pid ? await sh('[ -d /proc/' + pid + ' ] && echo yes || echo no') : { stdout:'no' };
+  const ok = alive.stdout.trim() === 'yes';
+  const st = ok ? '运行中 (PID ' + pid + ')' : '未运行';
+  if (st !== lastSt) { lastSt = st; $('st').textContent = st; $('st').className = 'badge ' + (ok ? 'ok' : 'bad'); }
+}
+$('save').onclick = async () => {
+  S.holdMs = +$('holdMs').value; S.maxHoldMs = +$('maxHoldMs').value; S.doubleMs = +$('doubleMs').value;
+  const txt = buildCfg(S);
+  const r = await sh('echo ' + b64(txt) + ' | base64 -d > ' + CONF + ' && echo saved');
+  if (r.stdout.indexOf('saved') >= 0) { toast('已保存，约 2 秒生效'); $('cfg').textContent = txt; }
+  else toast('保存失败: ' + (r.stderr || r.errno), true);
+};
+$('restart').onclick = async () => { const r = await sh('sh /data/adb/modules/fpgesture/fpgesture.sh restart'); toast(r.stdout.trim() || '已重启'); setTimeout(poll, 1200); };
+$('clear').onclick = async () => { await sh(': > ' + LOGF); lastLog = ''; poll(); };
+$('showCfg').onclick = () => { const c = $('cfg'); c.style.display = c.style.display === 'none' ? 'block' : 'none'; };
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+TAP_CMD input keyevent 120
+HOLD_CMD b=$(cat /sys/class/leds/white:flash/brightness 2>/dev/null); [ "${b:-0}" -gt 0 ] && echo 0 > /sys/class/leds/white:flash/brightness || echo 255 > /sys/class/leds/white:flash/brightness
+DOUBLE_CMD 
+HOLD_MS 1400
+MAX_HOLD_MS 3000
+DOUBLE_MS 400
+SUPPRESS_MS 800
+POLL 0.05
+TAP_LOCKED 0
+HOLD_LOCKED 0
+DOUBLE_LOCKED 1
+NATIVE_DOUBLE torch
