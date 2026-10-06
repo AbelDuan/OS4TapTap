@@ -22,7 +22,7 @@ PIDF=${FPGESTURE_PID:-/data/adb/fpgesture/fpgesture.pid}
 SHARE_DIR=/data/adb/fpgesture
 
 TAP_CMD=""; HOLD_CMD=""; DOUBLE_CMD=""
-HOLD_MS=1400; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800; POLL=0.05
+TAP_MAX_MS=800; HOLD_MS=1500; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800; POLL=0.05
 TAP_LOCKED=0; HOLD_LOCKED=0; DOUBLE_LOCKED=0; NATIVE_DOUBLE=keep; prev_native=
 
 DRY=0; EV=""
@@ -38,7 +38,8 @@ load() {
       TAP_CMD)       TAP_CMD=$val ;;
       HOLD_CMD)      HOLD_CMD=$val ;;
       DOUBLE_CMD)    DOUBLE_CMD=$val ;;
-      HOLD_MS)       HOLD_MS=${val:-1400} ;;
+      TAP_MAX_MS)    TAP_MAX_MS=${val:-800} ;;
+      HOLD_MS)       HOLD_MS=${val:-1500} ;;
       MAX_HOLD_MS)   MAX_HOLD_MS=${val:-3000} ;;
       DOUBLE_MS)     DOUBLE_MS=${val:-400} ;;
       SUPPRESS_MS)   SUPPRESS_MS=${val:-800} ;;
@@ -90,13 +91,15 @@ edge() { # edge <now_ms> - one IRQ edge toggles the touch state
     [ "$in_suppress" = 1 ] && { in_suppress=0; return; }
     [ "$swallow_up" = 1 ] && { swallow_up=0; return; }
     dur=$(( t - down_ms ))
-    if [ "$dur" -gt "$MAX_HOLD_MS" ]; then
-      log "cancelled ${dur}ms (> ${MAX_HOLD_MS}ms - press longer to cancel)"
-    elif [ "$dur" -ge "$HOLD_MS" ]; then
+    if [ "$dur" -le "$TAP_MAX_MS" ]; then
+      log "tap ${dur}ms (pending)"; pending=$t
+    elif [ "$dur" -ge "$HOLD_MS" ] && [ "$dur" -le "$MAX_HOLD_MS" ]; then
       if [ "$ct_locked" = 1 ] && [ "$HOLD_LOCKED" != 1 ]; then log "hold ${dur}ms ignored (locked)"
       else log "hold ${dur}ms"; fire "$HOLD_CMD" hold; fi
+    elif [ "$dur" -gt "$MAX_HOLD_MS" ]; then
+      log "cancelled ${dur}ms (> ${MAX_HOLD_MS}ms - mis-touch)"
     else
-      log "tap ${dur}ms (pending)"; pending=$t
+      log "dead zone ${dur}ms (${TAP_MAX_MS}~${HOLD_MS}) ignored"
     fi
   fi
 }
@@ -136,7 +139,7 @@ run() {
   load
   apply_native
   echo $$ > "$PIDF"
-  log "start hold=${HOLD_MS}-${MAX_HOLD_MS}ms double=${DOUBLE_MS}ms locked(t/h/d)=${TAP_LOCKED}/${HOLD_LOCKED}/${DOUBLE_LOCKED}"
+  log "start tap<=${TAP_MAX_MS}ms hold=${HOLD_MS}-${MAX_HOLD_MS}ms double=${DOUBLE_MS}ms locked(t/h/d)=${TAP_LOCKED}/${HOLD_LOCKED}/${DOUBLE_LOCKED}"
   last_count=$(irq_count)
   [ -z "$last_count" ] && { log "FATAL: no '$IRQ_NAME' in $IRQ"; exit 1; }
   log "irq baseline=$last_count"
@@ -168,7 +171,7 @@ selftest() {
   rst() { EV=""; touching=0; down_ms=0; pending=0; suppress=0; in_suppress=0; swallow_up=0; ct_locked=0; last_count=0; STUB_LOCKED=0; }
   keyguard_locked() { echo "$STUB_LOCKED"; }
   TAP_CMD=x; HOLD_CMD=x; DOUBLE_CMD=x
-  HOLD_MS=1400; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800
+  TAP_MAX_MS=800; HOLD_MS=1500; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800
   TAP_LOCKED=0; HOLD_LOCKED=0; DOUBLE_LOCKED=0
 
   rst; sample 0 1000; sample 1 1020; sample 2 1120; sample 2 1600
@@ -179,6 +182,9 @@ selftest() {
 
   rst; sample 0 5000; sample 1 5020; sample 2 9020; sample 2 9500
   chk "too long cancelled" "" "$EV"
+
+  rst; sample 0 12000; sample 1 12020; sample 2 13020; sample 2 13500
+  chk "dead zone ignored" "" "$EV"
 
   rst; sample 1 6000; sample 2 6060; sample 3 6120; sample 4 6180; sample 4 7000
   chk "double" "double " "$EV"

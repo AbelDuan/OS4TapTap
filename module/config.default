@@ -1,7 +1,8 @@
 TAP_CMD input keyevent 120
-HOLD_CMD b=$(cat /sys/class/leds/white:flash/brightness 2>/dev/null); [ "${b:-0}" -gt 0 ] && echo 0 > /sys/class/leds/white:flash/brightness || echo 255 > /sys/class/leds/white:flash/brightness
+HOLD_CMD am start-foreground-service -a android.intent.action.ASSIST -n com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService --es voice_assist_start_from_key three_gesture_up
 DOUBLE_CMD 
-HOLD_MS 1400
+TAP_MAX_MS 800
+HOLD_MS 1500
 MAX_HOLD_MS 3000
 DOUBLE_MS 400
 SUPPRESS_MS 800

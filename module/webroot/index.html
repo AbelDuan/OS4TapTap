@@ -65,13 +65,17 @@
 <div id="cards"></div>
 
 <div class="card">
-  <h2>判定参数</h2>
+  <h2>判定区间 <span class="badge">可自定义</span></h2>
   <div class="row">
-    <div><label>轻触/长按分界 (ms)</label><input id="holdMs" type="number" min="200" max="5000" step="50"></div>
-    <div><label>长按上限 (ms)</label><input id="maxHoldMs" type="number" min="500" max="10000" step="100"></div>
+    <div><label>轻触上限 (ms)</label><input id="tapMaxMs" type="number" min="100" max="3000" step="50"></div>
+    <div><label>长按起点 (ms)</label><input id="holdMs" type="number" min="200" max="5000" step="50"></div>
   </div>
-  <label>双击窗口 (ms)</label><input id="doubleMs" type="number" min="150" max="900" step="50">
-  <div class="note">按住超过「长按上限」判为误触，不执行动作——误触时多按一会儿再松手即可取消。</div>
+  <div class="row" style="margin-top:8px">
+    <div><label>长按上限 (ms)</label><input id="maxHoldMs" type="number" min="500" max="10000" step="100"></div>
+    <div><label>双击窗口 (ms)</label><input id="doubleMs" type="number" min="150" max="900" step="50"></div>
+  </div>
+  <div class="note">松手时间：<b>≤ 轻触上限</b> → 轻触；<b>长按起点 ~ 长按上限</b> → 长按；
+  中间的死区与超上限 → <b>不执行</b>（误触时多按一会儿再松手即可取消）。</div>
 </div>
 
 <button id="save">保存并生效</button>
@@ -133,7 +137,7 @@ const ACTIONS = [
   ['none','不执行动作'],['torch','手电筒 开/关'],['screenshot','截屏'],['home','回桌面'],['back','返回'],
   ['notifications','下拉通知栏'],['playpause','播放/暂停'],['next','下一首'],['prev','上一首'],
   ['volup','音量 +'],['voldown','音量 -'],['camera','打开相机'],['app','打开指定应用'],['custom','自定义命令'],
-  ['assistant','小爱同学（助手）'],['aimemory','小爱同学（系统原生双击）'],
+  ['assistant','小爱同学（助手·语音）'],['aimem','小爱记忆（直接记忆·三指同款）'],['xiaoi','小爱指令（自定义文本）'],
 ];
 const ACTIONS_FOR = k => k === 'double' ? ACTIONS : ACTIONS.filter(a => a[0] !== 'aimemory');
 const LABEL = Object.fromEntries(ACTIONS);
@@ -145,7 +149,12 @@ const GESTURES = [
 const COMMON = ['com.tencent.mm','com.eg.android.AlipayGphone','com.android.camera','com.android.settings',
   'com.android.chrome','com.ss.android.ugc.aweme','tv.danmaku.bili','com.tencent.mobileqq','com.taobao.taobao',
   'com.xingin.xhs','com.miui.notes','top.funcun.dshfolk'];
-let S = null, PK = [];
+const DEFAULT_STATE = {
+  tap:{type:'screenshot',value:'',locked:false}, hold:{type:'torch',value:'',locked:false},
+  double:{type:'none',value:'',locked:false},
+  tapMaxMs:800, holdMs:1500, maxHoldMs:3000, doubleMs:400,
+};
+let S = JSON.parse(JSON.stringify(DEFAULT_STATE)), PK = [];
 const $ = id => document.getElementById(id);
 function toast(m, bad) { const t = $('toast'); t.textContent = m; t.className = 'toast on' + (bad ? ' err' : ''); setTimeout(() => t.className = 'toast', 1800); }
 
@@ -199,7 +208,8 @@ function parseCfg(txt) {
   const g = k => Object.assign(guess(kv[k.toUpperCase() + '_CMD']), { locked: kv[k.toUpperCase() + '_LOCKED'] === '1' });
   return {
     tap: g('tap'), hold: g('hold'), double: g('double'),
-    holdMs: +kv.HOLD_MS || 1400, maxHoldMs: +kv.MAX_HOLD_MS || 3000, doubleMs: +kv.DOUBLE_MS || 400,
+    tapMaxMs: +kv.TAP_MAX_MS || 800, holdMs: +kv.HOLD_MS || 1500,
+    maxHoldMs: +kv.MAX_HOLD_MS || 3000, doubleMs: +kv.DOUBLE_MS || 400,
   };
 }
 function buildCfg(s) {
@@ -208,6 +218,7 @@ function buildCfg(s) {
     'TAP_CMD ' + cmd(s.tap),
     'HOLD_CMD ' + cmd(s.hold),
     'DOUBLE_CMD ' + cmd(s.double),
+    'TAP_MAX_MS ' + s.tapMaxMs,
     'HOLD_MS ' + s.holdMs,
     'MAX_HOLD_MS ' + s.maxHoldMs,
     'DOUBLE_MS ' + s.doubleMs,
@@ -264,17 +275,30 @@ function sync() {
     $('sel_' + k).style.display = t === 'app' ? 'block' : 'none';
     $('lk_' + k).checked = !!S[k].locked;
   }
-  $('holdMs').value = S.holdMs; $('maxHoldMs').value = S.maxHoldMs; $('doubleMs').value = S.doubleMs;
+  $('tapMaxMs').value = S.tapMaxMs; $('holdMs').value = S.holdMs;
+  $('maxHoldMs').value = S.maxHoldMs; $('doubleMs').value = S.doubleMs;
   $('cfg').textContent = buildCfg(S);
 }
+function setStatus(msg, bad) { const el = $('st'); if (el) { el.textContent = msg; el.className = 'badge ' + (bad ? 'bad' : 'ok'); } }
 async function load() {
-  if (typeof ksu === 'undefined') { $('log').textContent = '⚠️ 请在 KernelSU 管理器的模块页点「打开」进入本界面（普通浏览器拿不到 root 桥）'; return; }
-  const r = await sh('cat ' + CONF + ' 2>/dev/null');
-  S = parseCfg(r.stdout);
-  render();
-  const p = await sh('cat ' + PKGS + ' 2>/dev/null');
-  PK = p.stdout.split('\n').map(x => x.trim()).filter(Boolean);
-  poll(); setInterval(poll, 2000);
+  render();                                   // 先用默认值把界面画出来：桥没通也不会是一片空白
+  if (typeof ksu === 'undefined' || !ksu.exec) {
+    setStatus('未检测到 KSU 桥', true);
+    $('log').textContent = '⚠️ 请从 KernelSU 管理器 → 模块 → 指纹键手势 →「打开」进入本界面。\n'
+      + '（当前显示的是默认值；普通浏览器里拿不到 root 桥，读不到也无法保存配置。）';
+    return;
+  }
+  try {
+    const r = await sh('cat ' + CONF + ' 2>/dev/null');
+    if (r && r.stdout && r.stdout.trim()) { S = parseCfg(r.stdout); render(); }
+    const p = await sh('cat ' + PKGS + ' 2>/dev/null');
+    PK = (p.stdout || '').split('\n').map(x => x.trim()).filter(Boolean);
+    setStatus('配置已读取', false);
+    poll(); setInterval(poll, 2000);
+  } catch (e) {
+    setStatus('读取配置失败', true);
+    $('log').textContent = '读取配置失败：' + (e && e.message ? e.message : e) + '\n界面显示的是默认值。';
+  }
 }
 let lastLog = '', lastSt = '';
 async function poll() {
@@ -289,7 +313,10 @@ async function poll() {
   if (st !== lastSt) { lastSt = st; $('st').textContent = st; $('st').className = 'badge ' + (ok ? 'ok' : 'bad'); }
 }
 $('save').onclick = async () => {
-  S.holdMs = +$('holdMs').value; S.maxHoldMs = +$('maxHoldMs').value; S.doubleMs = +$('doubleMs').value;
+  S.tapMaxMs = +$('tapMaxMs').value || 800;
+  S.holdMs = +$('holdMs').value || 1500;
+  S.maxHoldMs = +$('maxHoldMs').value || 3000;
+  S.doubleMs = +$('doubleMs').value || 400;
   const txt = buildCfg(S);
   const r = await sh('echo ' + b64(txt) + ' | base64 -d > ' + CONF + ' && echo saved');
   if (r.stdout.indexOf('saved') >= 0) { toast('已保存，约 2 秒生效'); $('cfg').textContent = txt; }
