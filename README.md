@@ -157,3 +157,23 @@ am start -n com.miui.voiceassist/com.xiaomi.voiceassistant.settings.MemorySettin
 
 **剩余唯一有戏的路线**：LSPosed hook（本机已装 `zygisk_lsposed`）——hook 小爱读取来源/展示记忆岛的那处逻辑，
 把任意来源当作 `three_gesture_up`。代价：要手写 smali + 打包 Xposed 模块（容器无 Android 构建链）。
+
+### 小窗 / 分屏：为什么不能做成 shell 动作（2026-10-07 实测结论）
+
+两者都是 **SystemUI 内部转场**，只有 LSPosed 在 SystemUI 进程内才调得到：
+
+| 功能 | 真实入口（HyperOS 4） | shell 可行性 |
+|---|---|---|
+| 双分屏 | `startIconDragSplitScreen(pi, hotArea=1/2, reason)`（`MultiTaskingHotAreaController`） | ❌ |
+| 小窗 | `MulWinSwitchTransition.startIconDragFreeform` → `MiuiMultiWindowUtils.getActivityOptions(ctx,pkg,true,x,y)` + `startTransition(ANIMATION_ICON_DRAG_TO_FREEFORM)` | ❌ |
+
+已排除的 shell 路线：
+
+- `am start --windowingMode 3/4/6/100/101` → MIUI **全部忽略**（窗口模式里始终没有 3/4）。
+- `am start --windowingMode 5`（freeform）→ 会产生 `mWindowingMode=5` 的窗口，但**没有 bounds**（`am` 不支持 `--bounds`），**不渲染成小窗**（曾误把它当通过，实机确认未生效）。
+- `cmd window` → 只有 size/density/folded-area/scaling，无分屏/小窗入口。
+- 已安装的 LSPosed 模块 `com.abel.os4freeformx`（v0.4.44）→ 开发期点火口 `PickActivity`/`FIRE:` **已删除**；`StoreProvider.call` 只支持 `getAll/getCfg/put/get` 配置读写。
+
+**可行路线**：给该 LSPosed 模块的 SystemUI hook 增加一个**动态广播接收器**（如 `com.abel.os4freeformx.action.FIRE` + `--es mode split|freeform|mini`），
+fpgesture 就能用一条 `am broadcast` 触发双分屏/小窗。容器里可离线重建（`build.sh` 即为 arm64 无 gradle 场景写的，`aapt2/zipalign/apksigner` 均在），
+装完需重启 SystemUI 生效（非重启设备）。
