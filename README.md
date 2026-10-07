@@ -269,3 +269,34 @@ getevent -lt <按名字解析出的 fp evdev> | while read line; do case "$line"
 `ps -A -o PID,ARGS` 里第二行其实是守护进程自己的**管道/后台子 shell**（子进程会继承父进程的 cmdline）。
 用 PPID 复核：`9350(PPID 17355) = 真守护进程`、`9443(PPID 9350) = 它自己的子 shell`、`9438(PPID 9350) = getevent watcher`
 —— 从头到尾只有**一个**守护进程。重复实例守卫保留（作为廉价的保险），但"双触发"这个根因**不成立**。
+
+## v1.11 / v1.12：双击链路完成（用户验收通过 2026-10-07）
+
+双击最终形态：**系统出键码（指纹 HAL 在 evdev 上报 `BTN_C`），模块出功能**。三个环节都有日志证据：
+
+| 环节 | 证据 |
+|---|---|
+| HAL 上报键码 | `getevent -lt /dev/input/event6` 收到 `BTN_C DOWN` |
+| watcher 识别 | `events.log: double tap (BTN_C from HAL)` |
+| 现读配置并执行 | `events.log: -> double: <DOUBLE_CMD>`（触发时从 config 现读） |
+
+**两个关键缺陷（都在实测中被抓出来）**：
+
+1. **watcher 不随配置热加载启动**：`double_watcher` 原本只在守护进程启动时起一次；启动时 `DOUBLE_CMD` 为空则永远不起。
+   修法：主循环热加载处管理 watcher 生命周期（非空且未运行 → 起；变空 → 停）。
+2. **watcher 用的是旧命令**：watcher 是后台子 shell，父 shell 热加载后的 `DOUBLE_CMD` 它**看不见**（shell 变量不跨进程），
+   而"重启 watcher"条件又只在 watcher 未运行时触发 → 一直用启动时的旧命令。
+   修法：**触发那一刻从 config 文件现读**（`grep '^DOUBLE_CMD ' | cut -d' ' -f2-`）。
+   自证方式：用假 `getevent` 测试桩（PATH 前置）模拟一次 `BTN_C`，日志显示执行了**测试前刚写进 config 的值**，无需真手指。
+
+**另一个隐患**：watcher "停止"时只杀管道 shell，`getevent` 子进程存活 → 会出现两个读取者（一次双击触发两次）。
+修法：每次启动 watcher 前先清掉所有 `getevent -lt` 读取者。
+
+**双击与系统绑定的关系**：`DOUBLE_CMD` 非空时，`apply_native` 写**占位函数名** `fpgesture_noop` ——
+设置非空（HAL 继续上报键码），但系统不认识这个函数名（`result:false`，不执行动作），所以一次双击只触发模块动作。
+
+## 发布
+
+- **当前稳定版：v1.12**（模块 zip：`dist/fpgesture-v1.12.zip`）
+- 安装：KernelSU 管理器 → 模块 → 从本地安装 zip → 重启（模块自启 `service.sh`）
+- 配置：KSU 管理器 → 模块 → 指纹键手势 →「打开」→ WebUI
