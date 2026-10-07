@@ -32,6 +32,7 @@ DRY=0; EV=""
 touching=0; down_ms=0; suppress=0
 last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; pending_release=0; pending_dur=0
 ct_locked=0; last_count=0; stat_edges=0; stat_acts=0
+watcher_pid=""
 
 load() {
   [ -f "$CONF" ] || return 0
@@ -181,6 +182,10 @@ refresh_packages() {
 
 double_watcher() { # 双击：系统出键码（evdev BTN_C），模块出功能
   [ -z "$DOUBLE_CMD" ] && return 0
+  # 先清掉可能残留的 getevent 读取者：两个 watcher 会让一次双击触发两次
+  for p in $(ps -A -o PID,ARGS 2>/dev/null | awk '$2=="getevent" && $3=="-lt" {print $1}'); do
+    kill "$p" 2>/dev/null && log "killed stale getevent pid=$p"
+  done
   dev=""
   for d in /dev/input/event*; do
     n=$(getevent -i "$d" 2>/dev/null | grep -m1 'name:' | sed 's/.*name: *"//; s/".*//')
@@ -245,13 +250,20 @@ run() {
   [ -z "$last_count" ] && { log "FATAL: no '$IRQ_NAME' in $IRQ"; exit 1; }
   log "irq baseline=$last_count"
   refresh_packages &
-  double_watcher
+  double_watcher; watcher_pid=$!
   n=0
   while :; do
     sleep "$POLL"
     sample "$(irq_count)" "$(now_ms)"
     n=$(( n + 1 ))
-    [ $(( n % 40 )) -eq 0 ] && { load; apply_native; }
+    [ $(( n % 40 )) -eq 0 ] && {
+      load; apply_native
+      if [ -n "$DOUBLE_CMD" ]; then
+        { [ -z "$watcher_pid" ] || ! kill -0 "$watcher_pid" 2>/dev/null; } && { double_watcher; watcher_pid=$!; log "double watcher (re)started pid=$watcher_pid"; }
+      elif [ -n "$watcher_pid" ]; then
+        kill "$watcher_pid" 2>/dev/null; watcher_pid=""; log "double watcher stopped (no DOUBLE_CMD)"
+      fi
+    }
   done
 }
 
