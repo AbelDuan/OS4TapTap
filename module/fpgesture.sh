@@ -20,6 +20,8 @@ IRQ=${FPGESTURE_IRQ:-/proc/interrupts}
 IRQ_NAME=${FPGESTURE_IRQ_NAME:-xiaomi[-_]fp}
 PIDF=${FPGESTURE_PID:-/data/adb/fpgesture/fpgesture.pid}
 SHARE_DIR=/data/adb/fpgesture
+DFLAG="$SHARE_DIR/double.flag"; DUMMY_FN="fpgesture_noop"
+FP_EVDEV_NAME=${FPGESTURE_EVDEV_NAME:-uinput-xiaomi}
 
 TAP_CMD=""; HOLD_CMD=""; DOUBLE_CMD=""
 TAP_MAX_MS=800; HOLD_MS=1500; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800; POLL=0.05
@@ -146,6 +148,14 @@ confirm_release() { # confirm_release <dur>
 
 sample() { # sample <irq_count> <now_ms>
   cnt=$1; t=$2
+  # 双击已由 evdev 键码确认 → 抑制 IRQ 路径，避免把双击误判成轻触
+  if [ -f "$DFLAG" ]; then
+    exp=$(cat "$DFLAG" 2>/dev/null); rm -f "$DFLAG"
+    case "$exp" in ''|*[!0-9]*) ;; *) if [ "$exp" -gt "$t" ]; then
+        suppress=$exp; touching=0; pending_release=0
+        log "double confirmed by evdev -> IRQ path suppressed $(( exp - t ))ms"
+    fi ;; esac
+  fi
   delta=$(( cnt - last_count )); last_count=$cnt
   while [ "$delta" -gt 0 ]; do edge "$t"; delta=$(( delta - 1 )); done
   # 抬起确认：安静满 QUIET_MS 才结算
@@ -181,6 +191,7 @@ double_watcher() { # 双击：系统出键码（evdev BTN_C），模块出功能
   getevent -lt "$dev" 2>/dev/null | while IFS= read -r line; do
     case "$line" in
       *"BTN_C"*"DOWN"*)
+        echo $(( $(now_ms) + SUPPRESS_MS )) > "$DFLAG"
         if [ "$ONLY_UNLOCKED" = 1 ] && [ "$(keyguard_locked)" = 1 ]; then log "double ignored (locked)"
         else log "double tap (BTN_C from HAL)"; fire "$DOUBLE_CMD" double; fi
         ;;
@@ -190,9 +201,14 @@ double_watcher() { # 双击：系统出键码（evdev BTN_C），模块出功能
 
 apply_native() {
   # 模块自己执行双击动作时，必须清掉系统原生绑定，否则一次双击会触发两个动作
-  [ -n "$DOUBLE_CMD" ] && NATIVE_DOUBLE=off # 双击由本进程接管时，关掉系统原生绑定，避免一次双击触发两次
+  [ -n "$DOUBLE_CMD" ] && NATIVE_DOUBLE=noop # 双击由本进程接管时，关掉系统原生绑定，避免一次双击触发两次
   [ "$NATIVE_DOUBLE" = "$prev_native" ] && return 0
   case "$NATIVE_DOUBLE" in
+    noop)  # 占位：系统不认识这个函数名 -> 不动作；但设置非空 -> HAL 继续上报双击键码
+      if [ "$(settings get system fingerprint_double_tap)" != "$DUMMY_FN" ]; then
+        settings put system fingerprint_double_tap "$DUMMY_FN" && log "native double-tap = dummy '$DUMMY_FN' (keep HAL reporting, no system action)"
+      fi
+      prev_native=noop ;;
     off)   settings delete system fingerprint_double_tap 2>/dev/null; prev_native=off
            log "native double-tap binding removed (双击由系统原生处理)" ;;
     torch) settings put system fingerprint_double_tap turn_on_torch 2>/dev/null; prev_native=torch
@@ -205,10 +221,23 @@ run() {
   load
   apply_native
   # 防重复实例：两个守护进程会把手势动作触发两次（重复 = 双触发）
-  # 只认「sh <本脚本绝对路径> run」三字段全等的进程，避免误杀命令行里含同样字样的 shell
+  # ① pidfile 里那个若还活着，先请它退出（SIGTERM，1 秒后仍在就 SIGKILL）
+  if [ -f "$PIDF" ]; then
+    old=$(cat "$PIDF" 2>/dev/null)
+    case "$old" in ''|*[!0-9]*) ;; *)
+      if [ "$old" != "$$" ] && kill -0 "$old" 2>/dev/null; then
+        log "duplicate daemon pid=$old alive - terminating"
+        kill "$old" 2>/dev/null; sleep 1
+        kill -0 "$old" 2>/dev/null && kill -9 "$old" 2>/dev/null
+      fi ;;
+    esac
+  fi
+  # ② 再按字段精确扫一遍（只认「sh <本脚本绝对路径> run」三字段全等，避免误杀命令行含同样字样的 shell）
   for p in $(ps -A -o PID,ARGS 2>/dev/null | awk '$2=="sh" && $3 ~ /\/fpgesture\.sh$/ && $4=="run" { print $1 }'); do
     [ "$p" = "$$" ] && continue
     kill "$p" 2>/dev/null && log "killed duplicate daemon pid=$p"
+    sleep 1
+    kill -0 "$p" 2>/dev/null && { kill -9 "$p" 2>/dev/null; log "duplicate pid=$p needed SIGKILL"; }
   done
   echo $$ > "$PIDF"
   log "start tap<=${TAP_MAX_MS}ms hold=${HOLD_MS}-${MAX_HOLD_MS}ms double=${DOUBLE_MS}ms locked(t/h/d)=${TAP_LOCKED}/${HOLD_LOCKED}/${DOUBLE_LOCKED}"
