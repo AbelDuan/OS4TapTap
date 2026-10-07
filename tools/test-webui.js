@@ -66,7 +66,7 @@ setTimeout(() => {
       need(get('DOUBLE_MS') === '350', 'DOUBLE_MS not saved: ' + get('DOUBLE_MS'));
       need(get('TAP_CMD') === 'input keyevent 120', 'TAP_CMD lost: ' + get('TAP_CMD'));
       need(get('HOLD_CMD').startsWith('am start-foreground-service'), 'HOLD_CMD lost: ' + get('HOLD_CMD'));
-      need(get('DOUBLE_LOCKED') === '1', 'DOUBLE_LOCKED lost: ' + get('DOUBLE_LOCKED'));
+      need(get('DOUBLE_LOCKED') === '0', 'DOUBLE_LOCKED should be 0 (双击交回系统): ' + get('DOUBLE_LOCKED'));
       need(get('NATIVE_DOUBLE') === 'torch', 'NATIVE_DOUBLE should stay torch when double=none');
     }
     console.log(fail.length ? 'FAIL\n' + fail.join('\n') : 'webui selftest: ok (parse/rebuild/save all consistent)');

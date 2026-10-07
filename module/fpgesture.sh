@@ -23,12 +23,12 @@ SHARE_DIR=/data/adb/fpgesture
 
 TAP_CMD=""; HOLD_CMD=""; DOUBLE_CMD=""
 TAP_MAX_MS=800; HOLD_MS=1500; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800; POLL=0.05
-QUIET_MS=250; STORM_MIN_EDGES=4; STORM_SPAN_MS=700; SETTLE_MS=700
-TAP_LOCKED=0; HOLD_LOCKED=0; DOUBLE_LOCKED=0; NATIVE_DOUBLE=keep; prev_native=
+QUIET_MS=250; STORM_MIN_EDGES=3; STORM_SPAN_MS=400; SETTLE_MS=700; POST_STORM_MS=2000
+TAP_LOCKED=0; HOLD_LOCKED=0; DOUBLE_LOCKED=0; ONLY_UNLOCKED=1; NATIVE_DOUBLE=keep; prev_native=
 
 DRY=0; EV=""
-touching=0; down_ms=0; pending=0; suppress=0; in_suppress=0; swallow_up=0
-last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; double_armed=0
+touching=0; down_ms=0; suppress=0
+last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; pending_release=0; pending_dur=0
 ct_locked=0; last_count=0; stat_edges=0; stat_acts=0
 
 load() {
@@ -50,6 +50,7 @@ load() {
       STORM_MIN_EDGES) STORM_MIN_EDGES=${val:-4} ;;
       STORM_SPAN_MS) STORM_SPAN_MS=${val:-700} ;;
       SETTLE_MS)     SETTLE_MS=${val:-700} ;;
+      POST_STORM_MS) POST_STORM_MS=${val:-2000} ;;
       TAP_LOCKED)    TAP_LOCKED=${val:-0} ;;
       HOLD_LOCKED)   HOLD_LOCKED=${val:-0} ;;
       DOUBLE_LOCKED) DOUBLE_LOCKED=${val:-0} ;;
@@ -78,64 +79,67 @@ fire() { # fire <cmd> <name>
   ( sh -c "$1" >/dev/null 2>&1 & )
 }
 
-edge() { # edge <now_ms> - one IRQ edge toggles the touch state
+edge() { # edge <now_ms> - one IRQ edge; 按下/抬起 + 抬起必须被"安静"验证
   t=$1
   stat_edges=$(( stat_edges + 1 ))
-  gap=$(( t - last_edge ))
-  [ "$last_edge" = 0 ] && gap=999999
+  gap=$(( t - last_edge )); [ "$last_edge" = 0 ] && gap=999999
+  last_edge=$t
+
   # --- 风暴过滤：密集边沿持续过久 = 指纹认证/扫描，不是人手势 ---
   if [ "$gap" -lt "$QUIET_MS" ]; then
     [ "$burst_start" = 0 ] && burst_start=$t
     burst_edges=$(( burst_edges + 1 ))
     if [ "$storm" = 0 ] && [ "$burst_edges" -ge "$STORM_MIN_EDGES" ] && [ $(( t - burst_start )) -ge "$STORM_SPAN_MS" ]; then
-      storm=1; touching=0; pending=0; double_armed=0
+      storm=1; touching=0; pending_release=0; suppress=$(( t + POST_STORM_MS ))
       log "storm: ${burst_edges} edges over $(( t - burst_start ))ms (auth/scan?) - suppressing"
     fi
   else
-    # 串结束 → 结算延迟的双击（串内判成风暴的，这里已清零，不会结算）
-    if [ "$double_armed" != 0 ]; then
-      double_armed=0
-      if [ "$storm" = 1 ]; then log "double cancelled (storm)"
-      elif [ "$ct_locked" = 1 ] && [ "$DOUBLE_LOCKED" != 1 ]; then log "double ignored (locked)"
-      else log "double tap"; fire "$DOUBLE_CMD" double; fi
+    if [ "$storm" = 1 ]; then
+      storm=0
+      suppress=$(( t + POST_STORM_MS ))
+      log "storm ended - cooling down ${POST_STORM_MS}ms (fingerprint was in use)"
     fi
-    [ "$storm" = 1 ] && { storm=0; log "storm ended"; }
     burst_start=0; burst_edges=1
   fi
-  last_edge=$t
   [ "$storm" = 1 ] && return
-  # --- 失配安全网：吞掉强制复位后的第一个边沿（否则抬起会被当成按下） ---
   [ "$swallow_next" = 1 ] && { swallow_next=0; log "swallowed edge after reset"; return; }
-  # --- 按下门槛：必须前一段安静，否则是余波/伪边沿 ---
-  if [ "$touching" = 0 ] && [ "$gap" -lt "$QUIET_MS" ] && [ "$pending" = 0 ]; then
-    log "spurious edge (gap ${gap}ms) ignored"
+  [ "$suppress" != 0 ] && [ "$t" -lt "$suppress" ] && { log "suppressed edge"; return; }
+
+  # --- 上一次的抬起还在等确认：若此刻又来了边沿 → 那个"抬起"是假的 ---
+  if [ "$pending_release" != 0 ]; then
+    log "release invalidated (edge ${gap}ms after release) - pair discarded"
+    pending_release=0; pending_dur=0
+    suppress=$(( t + SUPPRESS_MS ))          # 抑制整段（含官方双击的第二下）
+    touching=1; down_ms=$t                    # 这个边沿其实是新触摸的按下
     return
   fi
+
+  # --- 按下 / 抬起 ---
   if [ "$touching" = 0 ]; then
-    touching=1; down_ms=$t; in_suppress=0
-    [ "$suppress" != 0 ] && [ "$t" -lt "$suppress" ] && { in_suppress=1; return; }
-    ct_locked=$(keyguard_locked)
-    if [ "$pending" != 0 ]; then
-      pending=0; suppress=$(( t + SUPPRESS_MS )); swallow_up=1; double_armed=$t
-      log "double armed (settle at burst end)"
-    else
-      swallow_up=0
+    if [ "$gap" -lt "$QUIET_MS" ]; then
+      log "spurious edge (gap ${gap}ms) ignored"; return
     fi
+    touching=1; down_ms=$t
+    if [ "$ONLY_UNLOCKED" = 1 ]; then ct_locked=$(keyguard_locked); else ct_locked=0; fi
   else
-    touching=0
-    [ "$in_suppress" = 1 ] && { in_suppress=0; return; }
-    [ "$swallow_up" = 1 ] && { swallow_up=0; return; }
-    dur=$(( t - down_ms ))
-    if [ "$dur" -le "$TAP_MAX_MS" ]; then
-      log "tap ${dur}ms (pending)"; pending=$t
-    elif [ "$dur" -ge "$HOLD_MS" ] && [ "$dur" -le "$MAX_HOLD_MS" ]; then
-      if [ "$ct_locked" = 1 ] && [ "$HOLD_LOCKED" != 1 ]; then log "hold ${dur}ms ignored (locked)"
-      else log "hold ${dur}ms"; fire "$HOLD_CMD" hold; fi
-    elif [ "$dur" -gt "$MAX_HOLD_MS" ]; then
-      log "cancelled ${dur}ms (> ${MAX_HOLD_MS}ms - mis-touch)"
-    else
-      log "dead zone ${dur}ms (${TAP_MAX_MS}~${HOLD_MS}) ignored"
-    fi
+    dur=$(( t - down_ms )); touching=0
+    pending_release=$t; pending_dur=$dur
+    log "release ${dur}ms (waiting ${QUIET_MS}ms quiet to confirm)"
+  fi
+}
+
+confirm_release() { # confirm_release <dur>
+  dur=$1
+  if [ "$dur" -le "$TAP_MAX_MS" ]; then
+    if [ "$ct_locked" = 1 ] && [ "$TAP_LOCKED" != 1 ]; then log "tap ${dur}ms ignored (locked)"
+    else log "tap ${dur}ms"; fire "$TAP_CMD" tap; fi
+  elif [ "$dur" -ge "$HOLD_MS" ] && [ "$dur" -le "$MAX_HOLD_MS" ]; then
+    if [ "$ct_locked" = 1 ] && [ "$HOLD_LOCKED" != 1 ]; then log "hold ${dur}ms ignored (locked)"
+    else log "hold ${dur}ms"; fire "$HOLD_CMD" hold; fi
+  elif [ "$dur" -gt "$MAX_HOLD_MS" ]; then
+    log "cancelled ${dur}ms (> ${MAX_HOLD_MS}ms - mis-touch)"
+  else
+    log "dead zone ${dur}ms (${TAP_MAX_MS}~${HOLD_MS}) ignored"
   fi
 }
 
@@ -143,20 +147,15 @@ sample() { # sample <irq_count> <now_ms>
   cnt=$1; t=$2
   delta=$(( cnt - last_count )); last_count=$cnt
   while [ "$delta" -gt 0 ]; do edge "$t"; delta=$(( delta - 1 )); done
-  if [ "$double_armed" != 0 ] && [ $(( t - double_armed )) -ge "$SETTLE_MS" ]; then
-    double_armed=0
-    if [ "$storm" = 1 ]; then log "double cancelled (storm)"
-    elif [ "$ct_locked" = 1 ] && [ "$DOUBLE_LOCKED" != 1 ]; then log "double ignored (locked)"
-    else log "double tap"; fire "$DOUBLE_CMD" double; fi
+  # 抬起确认：安静满 QUIET_MS 才结算
+  if [ "$pending_release" != 0 ] && [ $(( t - pending_release )) -ge "$QUIET_MS" ]; then
+    d=$pending_dur; pending_release=0; pending_dur=0
+    confirm_release "$d"
   fi
+  # 失配安全网
   if [ "$touching" = 1 ] && [ $(( t - down_ms )) -gt $(( MAX_HOLD_MS + 500 )) ]; then
     log "state reset: down for $(( t - down_ms ))ms with no release (desync guard)"
-    touching=0; pending=0; swallow_next=1
-  fi
-  if [ "$pending" != 0 ] && [ $(( t - pending )) -ge "$DOUBLE_MS" ]; then
-    pending=0
-    if [ "$ct_locked" = 1 ] && [ "$TAP_LOCKED" != 1 ]; then log "single tap ignored (locked)"
-    else log "single tap"; fire "$TAP_CMD" tap; fi
+    touching=0; swallow_next=1
   fi
 }
 
@@ -173,7 +172,7 @@ apply_native() { # 双击由本进程接管时，关掉系统原生绑定，避�
   [ "$NATIVE_DOUBLE" = "$prev_native" ] && return 0
   case "$NATIVE_DOUBLE" in
     off)   settings delete system fingerprint_double_tap 2>/dev/null; prev_native=off
-           log "native double-tap binding removed (fpgesture handles it)" ;;
+           log "native double-tap binding removed (双击由系统原生处理)" ;;
     torch) settings put system fingerprint_double_tap turn_on_torch 2>/dev/null; prev_native=torch
            log "native double-tap = torch" ;;
     *)     prev_native=keep ;;
@@ -183,6 +182,12 @@ apply_native() { # 双击由本进程接管时，关掉系统原生绑定，避�
 run() {
   load
   apply_native
+  # 防重复实例：两个守护进程会把手势动作触发两次（重复 = 双触发）
+  # 只认「sh <本脚本绝对路径> run」三字段全等的进程，避免误杀命令行里含同样字样的 shell
+  for p in $(ps -A -o PID,ARGS 2>/dev/null | awk '$2=="sh" && $3 ~ /\/fpgesture\.sh$/ && $4=="run" { print $1 }'); do
+    [ "$p" = "$$" ] && continue
+    kill "$p" 2>/dev/null && log "killed duplicate daemon pid=$p"
+  done
   echo $$ > "$PIDF"
   log "start tap<=${TAP_MAX_MS}ms hold=${HOLD_MS}-${MAX_HOLD_MS}ms double=${DOUBLE_MS}ms locked(t/h/d)=${TAP_LOCKED}/${HOLD_LOCKED}/${DOUBLE_LOCKED}"
   last_count=$(irq_count)
@@ -213,8 +218,8 @@ replay() {
 selftest() {
   DRY=1; ok=0; bad=0
   chk() { if [ "$2" = "$3" ]; then ok=$((ok+1)); else bad=$((bad+1)); echo "FAIL want='$2' got='$3'"; fi; }
-  rst() { EV=""; touching=0; down_ms=0; pending=0; suppress=0; in_suppress=0; swallow_up=0
-last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; double_armed=0; ct_locked=0; last_count=0; STUB_LOCKED=0; }
+  rst() { EV=""; touching=0; down_ms=0; suppress=0
+last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; pending_release=0; pending_dur=0; ct_locked=0; last_count=0; STUB_LOCKED=0; }
   keyguard_locked() { echo "$STUB_LOCKED"; }
   TAP_CMD=x; HOLD_CMD=x; DOUBLE_CMD=x
   TAP_MAX_MS=800; HOLD_MS=1500; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800
@@ -223,7 +228,7 @@ last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; double_armed
   rst; sample 0 1000; sample 1 1020; sample 2 1120; sample 2 1600
   chk "tap" "tap " "$EV"
 
-  rst; sample 0 2000; sample 1 2020; sample 2 4020
+  rst; sample 0 2000; sample 1 2020; sample 2 4020; sample 2 4400
   chk "hold" "hold " "$EV"
 
   rst; sample 0 5000; sample 1 5020; sample 2 9020; sample 2 9500
@@ -236,22 +241,23 @@ last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; double_armed
   rst; i=0; while [ $i -lt 12 ]; do sample $((i+1)) $((30000 + i*150)); i=$((i+1)); done
   chk "auth storm suppressed" "" "$EV"
 
-  # 现象②：风暴之后，两次相隔 2s 的点按必须各算一次轻触（不得被判成长按）
+  # 现象②：风暴后 2s 冷却期内不响应；冷却后再点必须正常（且不得被判成长按）
   sample 13 32000; sample 14 32300; sample 14 34300
   sample 15 36000; sample 16 36300; sample 16 38300
-  chk "two taps after storm stay taps" "tap tap " "$EV"
+  chk "cooldown swallows first touch, later tap works" "tap " "$EV"
 
+  # 双击交给系统原生（HAL 自己报 306）→ 我们不得出手
   rst; sample 1 6000; sample 2 6060; sample 3 6120; sample 4 6180; sample 4 7000
-  chk "double" "double " "$EV"
+  chk "double-tap left to native" "" "$EV"
 
-  rst; STUB_LOCKED=1; sample 0 10000; sample 1 10020; sample 2 10120; sample 2 10600
+  rst; STUB_LOCKED=1; sample 0 10000; sample 1 10020; sample 2 10120; sample 2 10400; sample 2 10800
   chk "locked tap blocked" "" "$EV"
 
-  rst; STUB_LOCKED=1; TAP_LOCKED=1; sample 0 11000; sample 1 11020; sample 2 11120; sample 2 11600
+  rst; STUB_LOCKED=1; TAP_LOCKED=1; sample 0 11000; sample 1 11020; sample 2 11120; sample 2 11400; sample 2 11800
   TAP_LOCKED=0
   chk "locked tap allowed" "tap " "$EV"
 
-  rst; STUB_LOCKED=1; sample 0 12000; sample 1 12020; sample 2 14020
+  rst; STUB_LOCKED=1; sample 0 12000; sample 1 12020; sample 2 14020; sample 2 14400
   chk "locked hold blocked" "" "$EV"
 
   echo "selftest: ok=$ok bad=$bad"

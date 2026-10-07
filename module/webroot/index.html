@@ -154,7 +154,8 @@ const COMMON = ['com.tencent.mm','com.eg.android.AlipayGphone','com.android.came
 const DEFAULT_STATE = {
   tap:{type:'screenshot',value:'',locked:false}, hold:{type:'torch',value:'',locked:false},
   double:{type:'none',value:'',locked:false},
-  tapMaxMs:800, holdMs:1500, maxHoldMs:3000, doubleMs:400,
+  tapMaxMs:800, holdMs:1500, maxHoldMs:3000, doubleMs:400, nativeDouble:'keep',
+  quietMs:250, stormMinEdges:3, stormSpanMs:400, settleMs:700, postStormMs:2000,
 };
 let S = JSON.parse(JSON.stringify(DEFAULT_STATE)), PK = [];
 const $ = id => document.getElementById(id);
@@ -208,8 +209,13 @@ function parseCfg(txt) {
     return { type:'custom', value:cmd };
   };
   const g = k => Object.assign(guess(kv[k.toUpperCase() + '_CMD']), { locked: kv[k.toUpperCase() + '_LOCKED'] === '1' });
+  const nat = ['torch','off','keep'].indexOf(kv.NATIVE_DOUBLE) >= 0 ? kv.NATIVE_DOUBLE : 'keep';
   return {
     tap: g('tap'), hold: g('hold'), double: g('double'),
+    nativeDouble: nat,
+    quietMs: +kv.QUIET_MS || 250, stormMinEdges: +kv.STORM_MIN_EDGES || 3,
+    stormSpanMs: +kv.STORM_SPAN_MS || 400, settleMs: +kv.SETTLE_MS || 700,
+    postStormMs: +kv.POST_STORM_MS || 2000,
     tapMaxMs: +kv.TAP_MAX_MS || 800, holdMs: +kv.HOLD_MS || 1500,
     maxHoldMs: +kv.MAX_HOLD_MS || 3000, doubleMs: +kv.DOUBLE_MS || 400,
   };
@@ -219,17 +225,22 @@ function buildCfg(s) {
   return [
     'TAP_CMD ' + cmd(s.tap),
     'HOLD_CMD ' + cmd(s.hold),
-    'DOUBLE_CMD ' + cmd(s.double),
+    'DOUBLE_CMD ',   // 双击交回系统原生，模块不推断
     'TAP_MAX_MS ' + s.tapMaxMs,
     'HOLD_MS ' + s.holdMs,
     'MAX_HOLD_MS ' + s.maxHoldMs,
     'DOUBLE_MS ' + s.doubleMs,
     'SUPPRESS_MS 800',
+    'QUIET_MS ' + s.quietMs,
+    'STORM_MIN_EDGES ' + s.stormMinEdges,
+    'STORM_SPAN_MS ' + s.stormSpanMs,
+    'SETTLE_MS ' + s.settleMs,
+    'POST_STORM_MS ' + s.postStormMs,
     'POLL 0.05',
     'TAP_LOCKED ' + (s.tap.locked ? 1 : 0),
     'HOLD_LOCKED ' + (s.hold.locked ? 1 : 0),
-    'DOUBLE_LOCKED ' + (s.double.locked ? 1 : 0),
-    'NATIVE_DOUBLE ' + (s.double.type === 'none' ? 'torch' : 'off'),
+    'DOUBLE_LOCKED 0',
+    'NATIVE_DOUBLE ' + (s.nativeDouble || 'keep'),
   ].join('\n') + '\n';
 }
 const b64 = s => {                       // UTF-8 字节直接 base64（设备侧只做 base64 -d）
@@ -243,17 +254,33 @@ function render() {
   $('cards').innerHTML = GESTURES.map(g => `
     <div class="card">
       <h2>${g.name} <span class="badge">${g.hint}</span></h2>
+      ${g.k === 'double' ? `
+        <label>系统原生绑定（双击由指纹 HAL 自己识别，不再由模块推断）</label>
+        <button type="button" class="pick" id="nat_double_btn"></button>
+        <div class="note">双击交给系统：由 <code>settings system fingerprint_double_tap</code> 决定动作，稳定可靠。</div>
+      ` : `
       <label>动作</label>
-      <button type="button" class="pick" id="pk_${g.k}"></button>
+      <button type="button" class="pick" id="pk_${g.k}"></button>`}
+      ${g.k === 'double' ? '' : `
       <div id="ex_${g.k}" style="display:none">
         <label id="lb_${g.k}">参数</label>
         <input type="text" id="val_${g.k}">
         <button type="button" class="ghost" id="sel_${g.k}" style="display:none">从已安装应用中选择</button>
       </div>
-      <div class="chk"><input type="checkbox" id="lk_${g.k}"><span>锁屏时也生效</span></div>
+      <div class="chk"><input type="checkbox" id="lk_${g.k}"><span>锁屏时也生效</span></div>`}
     </div>`).join('');
+  const NATIVE_OPTS = [
+    { value:'torch', label:'手电筒 开/关' },
+    { value:'off',   label:'不执行（关闭系统双击动作）' },
+    { value:'keep',  label:'不改动（保持系统当前设置）' },
+  ];
+  const nd = $('nat_double_btn');
+  if (nd) nd.onclick = () => openSheet('双击 → 系统原生动作',
+      NATIVE_OPTS.map(o => ({ label:o.label, value:o.value })),
+      it => { S.nativeDouble = it.value; sync(); }, { selected: S.nativeDouble || 'keep' });
   for (const g of GESTURES) {
     const k = g.k;
+    if (k === 'double') continue;
     $('pk_' + k).onclick = () => openSheet('选择「' + g.name + '」的动作',
       ACTIONS_FOR(k).map(a => ({ label:a[1], value:a[0] })), it => { S[k].type = it.value; sync(); },
       { selected: S[k].type });
@@ -266,8 +293,12 @@ function render() {
   sync();
 }
 function sync() {
+  const NLABEL = { torch:'手电筒 开/关', off:'不执行（关闭系统双击动作）', keep:'不改动（保持系统当前设置）' };
+  if ($('nat_double_btn')) $('nat_double_btn').textContent = NLABEL[S.nativeDouble || 'keep'];
   for (const g of GESTURES) {
-    const k = g.k, t = S[k].type;
+    const k = g.k;
+    if (k === 'double') continue;
+    const t = S[k].type;
     $('pk_' + k).textContent = LABEL[t] || '不执行动作';
     const isParam = (t === 'app' || t === 'custom' || t === 'xiaoi');
     $('ex_' + k).style.display = isParam ? 'block' : 'none';
