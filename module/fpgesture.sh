@@ -196,9 +196,12 @@ double_watcher() { # 双击：系统出键码（evdev BTN_C），模块出功能
   getevent -lt "$dev" 2>/dev/null | while IFS= read -r line; do
     case "$line" in
       *"BTN_C"*"DOWN"*)
+        # 动作必须此刻从 config 现读：watcher 是后台子 shell，父 shell 热加载后的变量它看不到
+        dcmd=$(grep '^DOUBLE_CMD ' "$CONF" 2>/dev/null | head -1 | cut -d' ' -f2-)
         echo $(( $(now_ms) + SUPPRESS_MS )) > "$DFLAG"
         if [ "$ONLY_UNLOCKED" = 1 ] && [ "$(keyguard_locked)" = 1 ]; then log "double ignored (locked)"
-        else log "double tap (BTN_C from HAL)"; fire "$DOUBLE_CMD" double; fi
+        elif [ -n "$dcmd" ]; then log "double tap (BTN_C from HAL)"; fire "$dcmd" double
+        else log "double tap (BTN_C from HAL) - no DOUBLE_CMD set"; fi
         ;;
     esac
   done &
