@@ -51,6 +51,7 @@ load() {
       STORM_SPAN_MS) STORM_SPAN_MS=${val:-700} ;;
       SETTLE_MS)     SETTLE_MS=${val:-700} ;;
       POST_STORM_MS) POST_STORM_MS=${val:-2000} ;;
+      FP_EVDEV_NAME) FP_EVDEV_NAME=${val:-uinput-xiaomi} ;;
       TAP_LOCKED)    TAP_LOCKED=${val:-0} ;;
       HOLD_LOCKED)   HOLD_LOCKED=${val:-0} ;;
       DOUBLE_LOCKED) DOUBLE_LOCKED=${val:-0} ;;
@@ -168,7 +169,28 @@ refresh_packages() {
   pm list packages -3 2>/dev/null | sed 's/^package://' | sort -u > "$SHARE_DIR/packages.txt" 2>/dev/null
 }
 
-apply_native() { # 双击由本进程接管时，关掉系统原生绑定，避免一次双击触发两次
+double_watcher() { # 双击：系统出键码（evdev BTN_C），模块出功能
+  [ -z "$DOUBLE_CMD" ] && return 0
+  dev=""
+  for d in /dev/input/event*; do
+    n=$(getevent -i "$d" 2>/dev/null | grep -m1 'name:' | sed 's/.*name: *"//; s/".*//')
+    [ "$n" = "$FP_EVDEV_NAME" ] && { dev=$d; break; }
+  done
+  [ -z "$dev" ] && { log "double: evdev '$FP_EVDEV_NAME' not found"; return 0; }
+  log "double watcher on $dev (BTN_C)"
+  getevent -lt "$dev" 2>/dev/null | while IFS= read -r line; do
+    case "$line" in
+      *"BTN_C"*"DOWN"*)
+        if [ "$ONLY_UNLOCKED" = 1 ] && [ "$(keyguard_locked)" = 1 ]; then log "double ignored (locked)"
+        else log "double tap (BTN_C from HAL)"; fire "$DOUBLE_CMD" double; fi
+        ;;
+    esac
+  done &
+}
+
+apply_native() {
+  # 模块自己执行双击动作时，必须清掉系统原生绑定，否则一次双击会触发两个动作
+  [ -n "$DOUBLE_CMD" ] && NATIVE_DOUBLE=off # 双击由本进程接管时，关掉系统原生绑定，避免一次双击触发两次
   [ "$NATIVE_DOUBLE" = "$prev_native" ] && return 0
   case "$NATIVE_DOUBLE" in
     off)   settings delete system fingerprint_double_tap 2>/dev/null; prev_native=off
@@ -194,6 +216,7 @@ run() {
   [ -z "$last_count" ] && { log "FATAL: no '$IRQ_NAME' in $IRQ"; exit 1; }
   log "irq baseline=$last_count"
   refresh_packages &
+  double_watcher
   n=0
   while :; do
     sleep "$POLL"

@@ -138,7 +138,7 @@ const PRESETS = {
 const ACTIONS = [
   ['none','不执行动作'],['torch','手电筒 开/关'],['screenshot','截屏'],['home','回桌面'],['back','返回'],
   ['notifications','下拉通知栏'],['playpause','播放/暂停'],['next','下一首'],['prev','上一首'],
-  ['volup','音量 +'],['voldown','音量 -'],['camera','打开相机'],['search','搜索（全局搜索）'],['lock','锁屏（熄屏+锁屏）'],['app','打开指定应用'],['custom','自定义命令'],
+  ['volup','音量 +'],['voldown','音量 -'],['camera','打开相机'],['search','搜索（全局搜索）'],['lock','锁屏'],['app','打开指定应用'],['custom','自定义命令'],
   ['assistant','小爱同学（助手·语音）'],['aimem','小爱记忆（直接记忆·三指同款）'],['xiaoi','小爱指令（自定义文本）'],
 ];
 const ACTIONS_FOR = k => k === 'double' ? ACTIONS : ACTIONS.filter(a => a[0] !== 'aimemory');
@@ -155,7 +155,7 @@ const DEFAULT_STATE = {
   tap:{type:'screenshot',value:'',locked:false}, hold:{type:'torch',value:'',locked:false},
   double:{type:'none',value:'',locked:false},
   tapMaxMs:800, holdMs:1500, maxHoldMs:3000, doubleMs:400, nativeDouble:'keep',
-  quietMs:250, stormMinEdges:3, stormSpanMs:400, settleMs:700, postStormMs:2000,
+  quietMs:250, stormMinEdges:3, stormSpanMs:400, settleMs:700, postStormMs:2000, fpEvdevName:'uinput-xiaomi',
 };
 let S = JSON.parse(JSON.stringify(DEFAULT_STATE)), PK = [];
 const $ = id => document.getElementById(id);
@@ -216,6 +216,7 @@ function parseCfg(txt) {
     quietMs: +kv.QUIET_MS || 250, stormMinEdges: +kv.STORM_MIN_EDGES || 3,
     stormSpanMs: +kv.STORM_SPAN_MS || 400, settleMs: +kv.SETTLE_MS || 700,
     postStormMs: +kv.POST_STORM_MS || 2000,
+    fpEvdevName: kv.FP_EVDEV_NAME || 'uinput-xiaomi',
     tapMaxMs: +kv.TAP_MAX_MS || 800, holdMs: +kv.HOLD_MS || 1500,
     maxHoldMs: +kv.MAX_HOLD_MS || 3000, doubleMs: +kv.DOUBLE_MS || 400,
   };
@@ -225,7 +226,7 @@ function buildCfg(s) {
   return [
     'TAP_CMD ' + cmd(s.tap),
     'HOLD_CMD ' + cmd(s.hold),
-    'DOUBLE_CMD ',   // 双击交回系统原生，模块不推断
+    'DOUBLE_CMD ' + cmd(s.double),
     'TAP_MAX_MS ' + s.tapMaxMs,
     'HOLD_MS ' + s.holdMs,
     'MAX_HOLD_MS ' + s.maxHoldMs,
@@ -236,11 +237,12 @@ function buildCfg(s) {
     'STORM_SPAN_MS ' + s.stormSpanMs,
     'SETTLE_MS ' + s.settleMs,
     'POST_STORM_MS ' + s.postStormMs,
+    'FP_EVDEV_NAME ' + s.fpEvdevName,
     'POLL 0.05',
     'TAP_LOCKED ' + (s.tap.locked ? 1 : 0),
     'HOLD_LOCKED ' + (s.hold.locked ? 1 : 0),
-    'DOUBLE_LOCKED 0',
-    'NATIVE_DOUBLE ' + (s.nativeDouble || 'keep'),
+    'DOUBLE_LOCKED ' + (s.double.locked ? 1 : 0),
+    'NATIVE_DOUBLE off',   // 双击由模块执行，必须清掉系统原生绑定
   ].join('\n') + '\n';
 }
 const b64 = s => {                       // UTF-8 字节直接 base64（设备侧只做 base64 -d）
@@ -254,33 +256,17 @@ function render() {
   $('cards').innerHTML = GESTURES.map(g => `
     <div class="card">
       <h2>${g.name} <span class="badge">${g.hint}</span></h2>
-      ${g.k === 'double' ? `
-        <label>系统原生绑定（双击由指纹 HAL 自己识别，不再由模块推断）</label>
-        <button type="button" class="pick" id="nat_double_btn"></button>
-        <div class="note">双击交给系统：由 <code>settings system fingerprint_double_tap</code> 决定动作，稳定可靠。</div>
-      ` : `
       <label>动作</label>
-      <button type="button" class="pick" id="pk_${g.k}"></button>`}
-      ${g.k === 'double' ? '' : `
+      <button type="button" class="pick" id="pk_${g.k}"></button>
       <div id="ex_${g.k}" style="display:none">
         <label id="lb_${g.k}">参数</label>
         <input type="text" id="val_${g.k}">
         <button type="button" class="ghost" id="sel_${g.k}" style="display:none">从已安装应用中选择</button>
       </div>
-      <div class="chk"><input type="checkbox" id="lk_${g.k}"><span>锁屏时也生效</span></div>`}
+      <div class="chk"><input type="checkbox" id="lk_${g.k}"><span>锁屏时也生效</span></div>
     </div>`).join('');
-  const NATIVE_OPTS = [
-    { value:'torch', label:'手电筒 开/关' },
-    { value:'off',   label:'不执行（关闭系统双击动作）' },
-    { value:'keep',  label:'不改动（保持系统当前设置）' },
-  ];
-  const nd = $('nat_double_btn');
-  if (nd) nd.onclick = () => openSheet('双击 → 系统原生动作',
-      NATIVE_OPTS.map(o => ({ label:o.label, value:o.value })),
-      it => { S.nativeDouble = it.value; sync(); }, { selected: S.nativeDouble || 'keep' });
   for (const g of GESTURES) {
     const k = g.k;
-    if (k === 'double') continue;
     $('pk_' + k).onclick = () => openSheet('选择「' + g.name + '」的动作',
       ACTIONS_FOR(k).map(a => ({ label:a[1], value:a[0] })), it => { S[k].type = it.value; sync(); },
       { selected: S[k].type });
@@ -293,12 +279,8 @@ function render() {
   sync();
 }
 function sync() {
-  const NLABEL = { torch:'手电筒 开/关', off:'不执行（关闭系统双击动作）', keep:'不改动（保持系统当前设置）' };
-  if ($('nat_double_btn')) $('nat_double_btn').textContent = NLABEL[S.nativeDouble || 'keep'];
   for (const g of GESTURES) {
-    const k = g.k;
-    if (k === 'double') continue;
-    const t = S[k].type;
+    const k = g.k, t = S[k].type;
     $('pk_' + k).textContent = LABEL[t] || '不执行动作';
     const isParam = (t === 'app' || t === 'custom' || t === 'xiaoi');
     $('ex_' + k).style.display = isParam ? 'block' : 'none';

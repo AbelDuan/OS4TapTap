@@ -231,3 +231,26 @@ fpgesture 就能用一条 `am broadcast` 触发双分屏/小窗。容器里可�
 否则命令行里含同样字样的 shell（例如 agent 自己执行的命令）会被误杀 —— 这一点在本项目里踩过三次。
 
 复核：`ps` 计数 = 1，pidfile 与实际进程一致。
+
+## 2026-10-07 v1.9：双击改为「系统出键码、模块出功能」
+
+用户要求：双击要**由模块定义功能**，但**用系统自己的键码**（不要模块靠 IRQ 推断）。
+
+**实现**：指纹 HAL 的双击会在 **`/dev/input/event6`（`uinput-xiaomi`）** 上报 **`BTN_C`**（已用
+`getevent -pl /dev/input/event6` 确认该设备的能力表含 `KEY_HOME/KEY_POWER/KEY_MENU/KEY_BACK/BTN_C`）。
+模块在守护进程里起一个后台监听：
+
+```
+getevent -lt <按名字解析出的 fp evdev> | while read line; do case "$line" in *BTN_C*DOWN*) 执行 DOUBLE_CMD ;; esac; done &
+```
+
+要点：
+
+- **按设备名解析节点**（`FP_EVDEV_NAME uinput-xiaomi`），不写死 `event6`（重启后编号可能变）。
+- 只匹配 `DOWN`，避免抬起再触发一次。
+- 双击同时受「锁屏时也生效」策略约束。
+- **必须清掉系统原生绑定**（`NATIVE_DOUBLE off` → `settings delete system fingerprint_double_tap`），
+  否则一次双击会同时触发系统动作和模块动作。守护进程在 `DOUBLE_CMD` 非空时强制置 `off`。
+- IRQ 风暴过滤同时把双击的密集边沿挡掉，所以轻触/长触不会和双击抢触发。
+
+**锁屏动作**：预设名从「锁屏（熄屏+锁屏）」改为「**锁屏**」（行为不变：`input keyevent 223`）。
