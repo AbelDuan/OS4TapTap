@@ -351,6 +351,10 @@ getevent -lt <按名字解析出的 fp evdev> | while read line; do case "$line"
 
 selftest（daemon 10/10）与 WebUI 测试均通过。
 
+**打包补丁**：v1.13.1 初次打的 zip 用工具打包时丢失了 `fpgesture.sh` 等脚本的执行位（权限变 0666/无 Unix 位），
+导致 `service.sh` 拉不起守护进程、顶部一直显示"未运行"。已修正打包（脚本 0755、其余 0644），
+并在 `service.sh` 里兜底 `chmod 0755` 守护脚本，避免再次因打包丢位而打不开。
+
 ## 发布
 
 - **当前稳定版：v1.13.1**（模块 zip：`dist/fpgesture-v1.13.1.zip`）
