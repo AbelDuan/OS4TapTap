@@ -1,20 +1,31 @@
-TAP_CMD input keyevent 120
+# Hold action: long-press within [HOLD_MIN_MS, HOLD_MAX_MS]; present is the
+# default HyperOS voice-assistant gesture.
 HOLD_CMD am start-foreground-service -a android.intent.action.ASSIST -n com.miui.voiceassist/com.xiaomi.voiceassistant.VoiceService --es voice_assist_start_from_key three_gesture_up
+
+# Double-tap: handled by the system-native fingerprint_double_tap binding (HAL
+# reports BTN_C keycode 98). Leave DOUBLE_CMD empty so the module does NOT act;
+# the system keeps its own double-tap behavior. NATIVE_DOUBLE=off clears any
+# module-claimed native binding.
 DOUBLE_CMD 
-TAP_MAX_MS 800
+NATIVE_DOUBLE off
+
+# Long-press window (ms). Release duration in [HOLD_MIN_MS, HOLD_MAX_MS] fires
+# the hold action. Set both equal (e.g. 2000 = 2000) to fire immediately at that
+# value with no upper clamp. Shorter = ignored (was a touch); longer = ignored
+# (mis-touch). Defaults: anything held 2.0s-3.0s triggers.
+HOLD_MIN_MS 2000
+HOLD_MAX_MS 3000
+
+# Hard safety thresholds (always on, no per-gesture toggle):
+#   - 黑屏 / 锁屏 -> 不执行任何动作
+#   - 指纹识别中（传感器密集 IRQ 风暴）-> 不调用任何动作
+#   - 指纹识别完成后，手指若从未离开过按钮 -> 不识别
+SUPPRESS_MS 800
 QUIET_MS 250
 STORM_MIN_EDGES 3
 STORM_SPAN_MS 400
 SETTLE_MS 700
 POST_STORM_MS 2000
+POST_AUTH_MS 600
 FP_EVDEV_NAME uinput-xiaomi
-QUIET_MS 250
-HOLD_MS 1500
-MAX_HOLD_MS 3000
-DOUBLE_MS 400
-SUPPRESS_MS 800
 POLL 0.05
-TAP_LOCKED 0
-HOLD_LOCKED 0
-DOUBLE_LOCKED 0
-NATIVE_DOUBLE off

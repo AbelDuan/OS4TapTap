@@ -6,76 +6,82 @@
 <link rel="stylesheet" href="/internal/insets.css">
 <title>指纹键手势</title>
 <style>
-  :root { color-scheme: dark; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  /* 跟随系统浅色/深色：用 CSS 变量 + prefers-color-scheme，WebView 在系统切换时会自动重绘 */
+  :root { color-scheme: light dark;
+    --bg: #f2f3f5; --fg: #1f1f1f; --muted: #5f6368; --card: #ffffff; --card-bd: #e3e6ea;
+    --accent: #1a73e8; --accent-fg: #ffffff; --input-bg: #ffffff; --input-bd: #c9ced6;
+    --log-bg: #eef0f2; --log-bd: #e0e3e8; --ok: #1e8e3e; --ok-bd: #9bd8a8;
+    --bad: #d93025; --bad-bd: #f3b1a9; --accent-bd: #a9c7f5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14161a; --fg: #e8eaed; --muted: #9aa0a6; --card: #1e2126; --card-bd: #2c3138;
+      --accent: #8ab4f8; --accent-fg: #10131a; --input-bg: #14161a; --input-bd: #353b44;
+      --log-bg: #0f1115; --log-bd: #262b32; --ok: #6ee7a8; --ok-bd: #2f6b4a;
+      --bad: #ff9a8b; --bad-bd: #7a3a33; --accent-bd: #33507f; }
+  }
   body { margin: 0; padding: 14px 12px calc(28px + var(--window-inset-bottom, 0px));
-         background: #14161a; color: #e8eaed;
+         background: var(--bg); color: var(--fg);
          font: 15px/1.5 -apple-system,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;
          overflow-x: hidden; }
   h1 { font-size: 18px; margin: 0 0 2px; }
-  .sub { color: #9aa0a6; font-size: 12.5px; margin-bottom: 12px; }
-  .card { background: #1e2126; border: 1px solid #2c3138; border-radius: 14px; padding: 12px; margin-bottom: 10px; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 12px; }
+  .card { background: var(--card); border: 1px solid var(--card-bd); border-radius: 14px; padding: 12px; margin-bottom: 10px; }
   .card h2 { font-size: 15px; margin: 0 0 6px; display: flex; align-items: center; gap: 8px; }
-  .badge { font-size: 11px; color: #8ab4f8; border: 1px solid #33507f; border-radius: 6px; padding: 1px 6px; font-weight: 400; }
-  .badge.ok { color: #6ee7a8; border-color: #2f6b4a; }
-  .badge.bad { color: #ff9a8b; border-color: #7a3a33; }
-  label { display: block; font-size: 12.5px; color: #9aa0a6; margin: 8px 0 4px; }
+  .badge { font-size: 11px; color: var(--accent); border: 1px solid var(--accent-bd); border-radius: 6px; padding: 1px 6px; font-weight: 400; }
+  .badge.ok { color: var(--ok); border-color: var(--ok-bd); }
+  .badge.bad { color: var(--bad); border-color: var(--bad-bd); }
+  label { display: block; font-size: 12.5px; color: var(--muted); margin: 8px 0 4px; }
   input[type=text], input[type=number] {
-    width: 100%; padding: 11px 12px; font-size: 15px; color: #e8eaed; background: #14161a;
-    border: 1px solid #353b44; border-radius: 10px; }
+    width: 100%; padding: 11px 12px; font-size: 15px; color: var(--fg); background: var(--input-bg);
+    border: 1px solid var(--input-bd); border-radius: 10px; }
   .row { display: flex; gap: 10px; } .row > div { flex: 1; }
-  .chk { display: flex; align-items: center; gap: 9px; margin-top: 10px; font-size: 14px; }
-  .chk input { width: 20px; height: 20px; }
   button { width: 100%; padding: 14px; font-size: 16px; font-weight: 600; border: 0; border-radius: 12px;
-           background: #8ab4f8; color: #10131a; margin-top: 6px; }
-  button.ghost { background: #2c3138; color: #e8eaed; font-weight: 400; padding: 11px; font-size: 14px; }
-  button.pick { text-align: left; background: #14161a; border: 1px solid #353b44; color: #e8eaed;
+           background: var(--accent); color: var(--accent-fg); margin-top: 6px; }
+  button.ghost { background: var(--card-bd); color: var(--fg); font-weight: 400; padding: 11px; font-size: 14px; }
+  button.pick { text-align: left; background: var(--input-bg); border: 1px solid var(--input-bd); color: var(--fg);
                 font-weight: 400; font-size: 15px; padding: 11px 12px; display: flex; justify-content: space-between; align-items: center; }
-  button.pick:after { content: "▾"; color: #9aa0a6; }
-  pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.45; background: #0f1115;
-        border: 1px solid #262b32; border-radius: 10px; padding: 10px; max-height: 240px; overflow: auto; margin: 0; }
-  .note { font-size: 12px; color: #9aa0a6; margin-top: 8px; }
-  .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 30px; background: #8ab4f8; color: #10131a;
+  button.pick:after { content: "▾"; color: var(--muted); }
+  pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; line-height: 1.45; background: var(--log-bg);
+        border: 1px solid var(--log-bd); border-radius: 10px; padding: 10px; max-height: 240px; overflow: auto; margin: 0; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 30px; background: var(--accent); color: var(--accent-fg);
            padding: 10px 18px; border-radius: 10px; font-size: 14px; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 100; }
   .toast.on { opacity: 1; }
-  .toast.err { background: #ff9a8b; }
+  .toast.err { background: var(--bad); color: #fff; }
   /* 自绘选择面板：不用原生 select/datalist（它们由 WebView 渲染，样式不可控且会闪） */
   #mask { position: fixed; inset: 0; background: rgba(0,0,0,.55); opacity: 0; pointer-events: none;
           transition: opacity .18s; z-index: 90; }
   #mask.on { opacity: 1; pointer-events: auto; }
   #sheet { position: fixed; left: 0; right: 0; bottom: 0; max-height: 72vh; display: flex; flex-direction: column;
-           background: #1b1f25; border-top: 1px solid #2f353d; border-radius: 18px 18px 0 0;
+           background: var(--card); border-top: 1px solid var(--card-bd); border-radius: 18px 18px 0 0;
            transform: translateY(101%); transition: transform .22s ease-out; z-index: 95;
            padding-bottom: var(--window-inset-bottom, 0px); }
   #sheet.on { transform: translateY(0); }
   #sh-head { padding: 14px 16px 8px; font-size: 15px; font-weight: 600; display: flex; justify-content: space-between; }
-  #sh-head span.x { color: #9aa0a6; font-weight: 400; }
+  #sh-head span.x { color: var(--muted); font-weight: 400; }
   #sh-filter { margin: 0 14px 8px; }
   #sh-list { overflow: auto; padding: 0 8px 12px; -webkit-overflow-scrolling: touch; }
-  .opt { padding: 13px 14px; border-radius: 10px; font-size: 15px; }
-  .opt:active { background: #262b32; }
-  .opt.sel { color: #8ab4f8; font-weight: 600; }
-  .opt small { color: #9aa0a6; font-weight: 400; }
+  .opt { padding: 13px 14px; border-radius: 10px; font-size: 15px; color: var(--fg); }
+  .opt:active { background: var(--log-bg); }
+  .opt.sel { color: var(--accent); font-weight: 600; }
+  .opt small { color: var(--muted); font-weight: 400; }
 </style>
 </head>
 <body>
 <h1>指纹键手势 <span class="badge" id="st">检测中…</span></h1>
-<div class="sub">侧边指纹键：轻触 / 长按 / 双击 → 自定义动作 · 改动约 2 秒生效</div>
+<div class="sub">侧边指纹键：长按（自定义区间）/ 双击（系统原生）→ 自定义动作 · 改动约 2 秒生效</div>
 
 <div id="cards"></div>
 
 <div class="card">
-  <h2>判定区间 <span class="badge">可自定义</span></h2>
+  <h2>判定与安全 <span class="badge">可自定义</span></h2>
   <div class="row">
-    <div><label>轻触上限 (ms)</label><input id="tapMaxMs" type="number" min="100" max="3000" step="50"></div>
-    <div><label>长按起点 (ms)</label><input id="holdMs" type="number" min="200" max="5000" step="50"></div>
+    <div><label>长按起点 (ms)</label><input id="holdMinMs" type="number" min="300" max="8000" step="50"></div>
+    <div><label>长按终点 (ms)</label><input id="holdMaxMs" type="number" min="500" max="10000" step="50"></div>
   </div>
-  <div class="row" style="margin-top:8px">
-    <div><label>长按上限 (ms)</label><input id="maxHoldMs" type="number" min="500" max="10000" step="100"></div>
-    <div><label>双击窗口 (ms)</label><input id="doubleMs" type="number" min="150" max="900" step="50"></div>
-  </div>
-  <div class="note">松手时间：<b>≤ 轻触上限</b> → 轻触；<b>长按起点 ~ 长按上限</b> → 长按；
-  中间的死区与超上限 → <b>不执行</b>（误触时多按一会儿再松手即可取消）。</div>
+  <div class="note">松手时长落在 <b>起点 ~ 终点</b> 之间即判为长按并执行；设成 <b>起点 = 终点</b>
+  （如 2000 = 2000）则超过该值立即触发；短于起点 / 长于终点 → <b>不执行</b>。</div>
+  <div class="note">硬性安全：<b>黑屏 / 锁屏</b>、<b>指纹识别中</b>、以及 <b>识别完成手指尚未离开</b> 时一律不触发。</div>
 </div>
 
 <button id="save">保存并生效</button>
@@ -141,20 +147,18 @@ const ACTIONS = [
   ['volup','音量 +'],['voldown','音量 -'],['camera','打开相机'],['search','搜索（全局搜索）'],['lock','锁屏'],['app','打开指定应用'],['custom','自定义命令'],
   ['assistant','小爱同学（助手·语音）'],['aimem','小爱记忆（直接记忆·三指同款）'],['xiaoi','小爱指令（自定义文本）'],
 ];
-const ACTIONS_FOR = k => k === 'double' ? ACTIONS : ACTIONS.filter(a => a[0] !== 'aimemory');
 const LABEL = Object.fromEntries(ACTIONS);
 const GESTURES = [
-  { k:'tap', name:'轻触', hint:'短碰一下' },
-  { k:'hold', name:'长按', hint:'按住到分界值以上、上限以内' },
-  { k:'double', name:'双击', hint:'快速连碰两下' },
+  { k:'hold', name:'长按', hint:'按住到区间内松手即触发' },
+  { k:'double', name:'双击', hint:'系统原生键码，模块出功能' },
 ];
 const COMMON = ['com.tencent.mm','com.eg.android.AlipayGphone','com.android.camera','com.android.settings',
   'com.android.chrome','com.ss.android.ugc.aweme','tv.danmaku.bili','com.tencent.mobileqq','com.taobao.taobao',
   'com.xingin.xhs','com.miui.notes','top.funcun.dshfolk'];
 const DEFAULT_STATE = {
-  tap:{type:'screenshot',value:'',locked:false}, hold:{type:'torch',value:'',locked:false},
+  hold:{type:'torch',value:'',locked:false},
   double:{type:'none',value:'',locked:false},
-  tapMaxMs:800, holdMs:1500, maxHoldMs:3000, doubleMs:400, nativeDouble:'keep',
+  holdMinMs:2000, holdMaxMs:3000, nativeDouble:'keep',
   quietMs:250, stormMinEdges:3, stormSpanMs:400, settleMs:700, postStormMs:2000, fpEvdevName:'uinput-xiaomi',
 };
 let S = JSON.parse(JSON.stringify(DEFAULT_STATE)), PK = [];
@@ -211,26 +215,22 @@ function parseCfg(txt) {
   const g = k => Object.assign(guess(kv[k.toUpperCase() + '_CMD']), { locked: kv[k.toUpperCase() + '_LOCKED'] === '1' });
   const nat = ['torch','off','keep'].indexOf(kv.NATIVE_DOUBLE) >= 0 ? kv.NATIVE_DOUBLE : 'keep';
   return {
-    tap: g('tap'), hold: g('hold'), double: g('double'),
+    hold: g('hold'), double: g('double'),
     nativeDouble: nat,
     quietMs: +kv.QUIET_MS || 250, stormMinEdges: +kv.STORM_MIN_EDGES || 3,
     stormSpanMs: +kv.STORM_SPAN_MS || 400, settleMs: +kv.SETTLE_MS || 700,
     postStormMs: +kv.POST_STORM_MS || 2000,
     fpEvdevName: kv.FP_EVDEV_NAME || 'uinput-xiaomi',
-    tapMaxMs: +kv.TAP_MAX_MS || 800, holdMs: +kv.HOLD_MS || 1500,
-    maxHoldMs: +kv.MAX_HOLD_MS || 3000, doubleMs: +kv.DOUBLE_MS || 400,
+    holdMinMs: +kv.HOLD_MIN_MS || 2000, holdMaxMs: +kv.HOLD_MAX_MS || 3000,
   };
 }
 function buildCfg(s) {
   const cmd = g => (PRESETS[g.type] || PRESETS.none)((g.value || '').trim());
   return [
-    'TAP_CMD ' + cmd(s.tap),
     'HOLD_CMD ' + cmd(s.hold),
     'DOUBLE_CMD ' + cmd(s.double),
-    'TAP_MAX_MS ' + s.tapMaxMs,
-    'HOLD_MS ' + s.holdMs,
-    'MAX_HOLD_MS ' + s.maxHoldMs,
-    'DOUBLE_MS ' + s.doubleMs,
+    'HOLD_MIN_MS ' + s.holdMinMs,
+    'HOLD_MAX_MS ' + s.holdMaxMs,
     'SUPPRESS_MS 800',
     'QUIET_MS ' + s.quietMs,
     'STORM_MIN_EDGES ' + s.stormMinEdges,
@@ -239,10 +239,9 @@ function buildCfg(s) {
     'POST_STORM_MS ' + s.postStormMs,
     'FP_EVDEV_NAME ' + s.fpEvdevName,
     'POLL 0.05',
-    'TAP_LOCKED ' + (s.tap.locked ? 1 : 0),
     'HOLD_LOCKED ' + (s.hold.locked ? 1 : 0),
     'DOUBLE_LOCKED ' + (s.double.locked ? 1 : 0),
-    'NATIVE_DOUBLE off',   // 双击由模块执行，必须清掉系统原生绑定
+    'NATIVE_DOUBLE ' + (s.nativeDouble || 'keep'),
   ].join('\n') + '\n';
 }
 const b64 = s => {                       // UTF-8 字节直接 base64（设备侧只做 base64 -d）
@@ -263,7 +262,6 @@ function render() {
         <input type="text" id="val_${g.k}">
         <button type="button" class="ghost" id="sel_${g.k}" style="display:none">从已安装应用中选择</button>
       </div>
-      <div class="chk"><input type="checkbox" id="lk_${g.k}"><span>锁屏时也生效</span></div>
     </div>`).join('');
   for (const g of GESTURES) {
     const k = g.k;
@@ -271,7 +269,6 @@ function render() {
       ACTIONS_FOR(k).map(a => ({ label:a[1], value:a[0] })), it => { S[k].type = it.value; sync(); },
       { selected: S[k].type });
     $('val_' + k).oninput = e => { S[k].value = e.target.value; };
-    $('lk_' + k).onchange = e => { S[k].locked = e.target.checked; };
     $('sel_' + k).onclick = () => openSheet('选择应用',
       (PK.length ? PK : COMMON).map(p => ({ label:p, value:p })), it => { S[k].value = it.value; $('val_' + k).value = it.value; },
       { filter: true, selected: S[k].value });
@@ -288,10 +285,8 @@ function sync() {
     $('val_' + k).placeholder = t === 'app' ? 'com.tencent.mm' : (t === 'xiaoi' ? '记一下 / 打开手电筒' : 'input keyevent 26');
     if (document.activeElement !== $('val_' + k)) $('val_' + k).value = S[k].value || '';
     $('sel_' + k).style.display = t === 'app' ? 'block' : 'none';
-    $('lk_' + k).checked = !!S[k].locked;
   }
-  $('tapMaxMs').value = S.tapMaxMs; $('holdMs').value = S.holdMs;
-  $('maxHoldMs').value = S.maxHoldMs; $('doubleMs').value = S.doubleMs;
+  $('holdMinMs').value = S.holdMinMs; $('holdMaxMs').value = S.holdMaxMs;
   $('cfg').textContent = buildCfg(S);
 }
 function setStatus(msg, bad) { const el = $('st'); if (el) { el.textContent = msg; el.className = 'badge ' + (bad ? 'bad' : 'ok'); } }
@@ -328,10 +323,8 @@ async function poll() {
   if (st !== lastSt) { lastSt = st; $('st').textContent = st; $('st').className = 'badge ' + (ok ? 'ok' : 'bad'); }
 }
 $('save').onclick = async () => {
-  S.tapMaxMs = +$('tapMaxMs').value || 800;
-  S.holdMs = +$('holdMs').value || 1500;
-  S.maxHoldMs = +$('maxHoldMs').value || 3000;
-  S.doubleMs = +$('doubleMs').value || 400;
+  S.holdMinMs = +$('holdMinMs').value || 2000;
+  S.holdMaxMs = +$('holdMaxMs').value || 3000;
   const txt = buildCfg(S);
   const r = await sh('echo ' + b64(txt) + ' | base64 -d > ' + CONF + ' && echo saved');
   if (r.stdout.indexOf('saved') >= 0) { toast('已保存，约 2 秒生效'); $('cfg').textContent = txt; }

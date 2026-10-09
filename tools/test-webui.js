@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /* 用假 DOM + 假 KSU 桥跑 WebUI 的真实脚本，验证：解析配置 → 重建 → 保存写出的内容 */
 const fs = require('fs');
-const html = fs.readFileSync(__dirname + '/module/webroot/index.html', 'utf8');
+const html = fs.readFileSync(__dirname + '/../module/webroot/index.html', 'utf8');
 const js = html.split('<script>')[1].split('</script>')[0];
 
-const DEFAULT_CFG = fs.readFileSync(__dirname + '/module/config.default', 'utf8');
+const DEFAULT_CFG = fs.readFileSync(__dirname + '/../module/config.default', 'utf8');
 const els = {};
 const el = id => els[id] || (els[id] = { id, style: {}, textContent: '', innerHTML: '', value: '', checked: false,
   className: '', dataset: {}, addEventListener() {}, querySelector: () => ({ placeholder: '' }), onclick: null });
@@ -40,19 +40,28 @@ if (!actKeys.length || !preKeys.length) fail.push('守卫未能解析出动作�
 const need = (cond, msg) => { if (!cond) fail.push(msg); };
 setTimeout(() => {
   // 1) 解析默认配置后重建，必须与原文一致（含动作码、阈值、锁屏开关）
+  //    跳过：注释(# 开头)、空行、以及仅守护进程使用/UI 不暴露的字段(POST_AUTH_MS)
   const rebuilt = els['cfg'].textContent;
   for (const line of DEFAULT_CFG.trim().split('\n')) {
-    const key = line.split(' ')[0];
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    const key = trimmed.split(' ')[0];
+    if (key === 'POST_AUTH_MS') continue;
     const got = rebuilt.split('\n').find(l => l.startsWith(key + ' '));
-    need(got !== undefined && got.trim() === line.trim(), `rebuild mismatch: want「${line.trim()}」 got「${got && got.trim()}」`);
+    need(got !== undefined && got.trim() === trimmed, `rebuild mismatch: want「${trimmed}」 got「${got && got.trim()}」`);
   }
-  need((rebuilt.split('\n').find(l => l.startsWith('TAP_MAX_MS ')) || '').trim() === 'TAP_MAX_MS 800',
-       'rebuild 缺 TAP_MAX_MS 800: ' + rebuilt.split('\n').find(l => l.startsWith('TAP_MAX_MS ')));
-  // 2) 改参数 + 换动作为「打开应用」，保存后检查真正写出的 base64 内容
-  els['tapMaxMs'].value = '700';
-  els['holdMs'].value = '1500';
-  els['maxHoldMs'].value = '3500';
-  els['doubleMs'].value = '350';
+  need((rebuilt.split('\n').find(l => l.startsWith('HOLD_MIN_MS ')) || '').trim() === 'HOLD_MIN_MS 2000',
+       'rebuild 缺 HOLD_MIN_MS 2000: ' + rebuilt.split('\n').find(l => l.startsWith('HOLD_MIN_MS ')));
+  need((rebuilt.split('\n').find(l => l.startsWith('HOLD_MAX_MS ')) || '').trim() === 'HOLD_MAX_MS 3000',
+       'rebuild 缺 HOLD_MAX_MS 3000: ' + rebuilt.split('\n').find(l => l.startsWith('HOLD_MAX_MS ')));
+  // 移除单击：重建结果不得再出现 TAP_* 字段
+  need(rebuilt.split('\n').every(l => !l.startsWith('TAP_')),
+       'rebuild 仍含 TAP_ 字段（单击功能尚未移除）: ' + rebuilt.split('\n').filter(l => l.startsWith('TAP_')).join(','));
+  need(rebuilt.split('\n').every(l => !l.startsWith('DOUBLE_MS ')),
+       'rebuild 仍含 DOUBLE_MS 字段（双击交给系统，无需 ms）');
+  // 2) 改参数后保存，检查真正写出的 base64 内容
+  els['holdMinMs'].value = '1500';
+  els['holdMaxMs'].value = '3500';
   els['save'].onclick();
   setTimeout(() => {
     need(writes.length === 1, 'save did not write config (' + writes.length + ')');
@@ -60,14 +69,13 @@ setTimeout(() => {
       const b64 = writes[0].split(' ')[1];
       const txt = Buffer.from(b64, 'base64').toString('utf8');
       const get = k => (txt.split('\n').find(l => l.startsWith(k + ' ')) || '').slice(k.length + 1);
-      need(get('HOLD_MS') === '1500', 'HOLD_MS not saved: ' + get('HOLD_MS'));
-      need(get('TAP_MAX_MS') === '700', 'TAP_MAX_MS not saved: ' + get('TAP_MAX_MS'));
-      need(get('MAX_HOLD_MS') === '3500', 'MAX_HOLD_MS not saved: ' + get('MAX_HOLD_MS'));
-      need(get('DOUBLE_MS') === '350', 'DOUBLE_MS not saved: ' + get('DOUBLE_MS'));
-      need(get('TAP_CMD') === 'input keyevent 120', 'TAP_CMD lost: ' + get('TAP_CMD'));
+      need(get('HOLD_MIN_MS') === '1500', 'HOLD_MIN_MS not saved: ' + get('HOLD_MIN_MS'));
+      need(get('HOLD_MAX_MS') === '3500', 'HOLD_MAX_MS not saved: ' + get('HOLD_MAX_MS'));
       need(get('HOLD_CMD').startsWith('am start-foreground-service'), 'HOLD_CMD lost: ' + get('HOLD_CMD'));
-      need(get('DOUBLE_LOCKED') === '0', 'DOUBLE_LOCKED should be 0 (双击交回系统): ' + get('DOUBLE_LOCKED'));
-      need(get('NATIVE_DOUBLE') === 'off', 'NATIVE_DOUBLE 必须为 off（双击由模块执行，须清掉系统绑定）: ' + get('NATIVE_DOUBLE'));
+      need(get('DOUBLE_CMD') === '', 'DOUBLE_CMD 应为空（双击交回系统）: ' + JSON.stringify(get('DOUBLE_CMD')));
+      need(get('NATIVE_DOUBLE') === 'off', 'NATIVE_DOUBLE 必须为 off（双击由系统原生处理）: ' + get('NATIVE_DOUBLE'));
+      need(!txt.split('\n').some(l => l.startsWith('TAP_')), 'save 写回了 TAP_ 字段（单击未移除）');
+      need(!txt.split('\n').some(l => l.startsWith('DOUBLE_MS ')), 'save 写回了 DOUBLE_MS 字段');
     }
     console.log(fail.length ? 'FAIL\n' + fail.join('\n') : 'webui selftest: ok (parse/rebuild/save all consistent)');
     process.exit(fail.length ? 1 : 0);

@@ -1,16 +1,23 @@
 #!/system/bin/sh
-# fpgesture v3 - side fingerprint key gestures (Xiaomi lhasa / HyperOS 4)
+# fpgesture - side fingerprint key gestures (Xiaomi lhasa / HyperOS 4)
 #
 # Signal: /proc/interrupts counter of xiaomi_fp_irq. One touch = 2 edges
 #   (down at contact, up at release) - measured live: a 2s hold reads 1985ms.
 #
 # Config: plain "KEY value" lines, no quoting. Reloaded every ~2s, so the web UI
 #   changes actions without restarting anything.
-#     TAP_CMD / HOLD_CMD / DOUBLE_CMD   shell command (empty = no action)
-#     HOLD_MS 1400      >= this = long press
-#     MAX_HOLD_MS 3000  longer = mis-touch, ignored (press longer to cancel)
-#     DOUBLE_MS 400     two taps inside this window = double tap
-#     TAP_LOCKED/HOLD_LOCKED/DOUBLE_LOCKED   1 = also fire while locked
+#     HOLD_CMD / DOUBLE_CMD   shell command (empty = no action)
+#     HOLD_MIN_MS / HOLD_MAX_MS  long-press window: release duration in
+#        [HOLD_MIN_MS, HOLD_MAX_MS] fires the hold action. If both are equal
+#        (e.g. 2000 = 2000), any press >= that value fires (no upper clamp).
+#        Shorter = ignored (was just a touch); longer = ignored (mis-touch).
+#     DOUBLE_CMD  action for the system double-tap (HAL reports BTN_C); empty
+#        = let the system-native double-tap behavior stand.
+#
+# Hard safety (always on, no per-gesture toggle):
+#     1) 黑屏 / 锁屏  -> 不执行任何动作
+#     2) 指纹识别中（传感器密集 IRQ 风暴）-> 不调用任何动作
+#     3) 指纹识别完成后，手指若从未离开过按钮 -> 不识别
 #
 # usage: fpgesture.sh run|stop|restart|selftest|replay <file>|probe
 
@@ -20,18 +27,19 @@ IRQ=${FPGESTURE_IRQ:-/proc/interrupts}
 IRQ_NAME=${FPGESTURE_IRQ_NAME:-xiaomi[-_]fp}
 PIDF=${FPGESTURE_PID:-/data/adb/fpgesture/fpgesture.pid}
 SHARE_DIR=/data/adb/fpgesture
-DFLAG="$SHARE_DIR/double.flag"; DUMMY_FN="fpgesture_noop"
+DFLAG="$SHARE_DIR/double.flag"; DUMMY_FN="fpgesture_noop"; AUTH_FLAG="$SHARE_DIR/auth.block"
 FP_EVDEV_NAME=${FPGESTURE_EVDEV_NAME:-uinput-xiaomi}
 
-TAP_CMD=""; HOLD_CMD=""; DOUBLE_CMD=""
-TAP_MAX_MS=800; HOLD_MS=1500; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800; POLL=0.05
-QUIET_MS=250; STORM_MIN_EDGES=3; STORM_SPAN_MS=400; SETTLE_MS=700; POST_STORM_MS=2000
-TAP_LOCKED=0; HOLD_LOCKED=0; DOUBLE_LOCKED=0; ONLY_UNLOCKED=1; NATIVE_DOUBLE=keep; prev_native=
+HOLD_CMD=""; DOUBLE_CMD=""
+HOLD_MIN_MS=2000; HOLD_MAX_MS=3000; SUPPRESS_MS=800; POLL=0.05
+QUIET_MS=250; STORM_MIN_EDGES=3; STORM_SPAN_MS=400; SETTLE_MS=700; POST_STORM_MS=2000; POST_AUTH_MS=600
+NATIVE_DOUBLE=keep; prev_native=
 
 DRY=0; EV=""
 touching=0; down_ms=0; suppress=0
 last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; pending_release=0; pending_dur=0
-ct_locked=0; last_count=0; stat_edges=0; stat_acts=0
+last_count=0; stat_edges=0; stat_acts=0
+auth=0; auth_release=0           # 指纹使用期：接触未结束（手指没离开过）-> 不识别
 watcher_pid=""
 
 load() {
@@ -40,13 +48,10 @@ load() {
     key=${line%% *}; val=${line#* }
     [ "$key" = "$line" ] && val=""
     case "$key" in
-      TAP_CMD)       TAP_CMD=$val ;;
       HOLD_CMD)      HOLD_CMD=$val ;;
       DOUBLE_CMD)    DOUBLE_CMD=$val ;;
-      TAP_MAX_MS)    TAP_MAX_MS=${val:-800} ;;
-      HOLD_MS)       HOLD_MS=${val:-1500} ;;
-      MAX_HOLD_MS)   MAX_HOLD_MS=${val:-3000} ;;
-      DOUBLE_MS)     DOUBLE_MS=${val:-400} ;;
+      HOLD_MIN_MS)   HOLD_MIN_MS=${val:-2000} ;;
+      HOLD_MAX_MS)   HOLD_MAX_MS=${val:-3000} ;;
       SUPPRESS_MS)   SUPPRESS_MS=${val:-800} ;;
       POLL)          POLL=${val:-0.05} ;;
       QUIET_MS)      QUIET_MS=${val:-250} ;;
@@ -54,10 +59,8 @@ load() {
       STORM_SPAN_MS) STORM_SPAN_MS=${val:-700} ;;
       SETTLE_MS)     SETTLE_MS=${val:-700} ;;
       POST_STORM_MS) POST_STORM_MS=${val:-2000} ;;
+      POST_AUTH_MS)  POST_AUTH_MS=${val:-600} ;;
       FP_EVDEV_NAME) FP_EVDEV_NAME=${val:-uinput-xiaomi} ;;
-      TAP_LOCKED)    TAP_LOCKED=${val:-0} ;;
-      HOLD_LOCKED)   HOLD_LOCKED=${val:-0} ;;
-      DOUBLE_LOCKED) DOUBLE_LOCKED=${val:-0} ;;
       NATIVE_DOUBLE) NATIVE_DOUBLE=${val:-keep} ;;
     esac
   done < "$CONF"
@@ -71,45 +74,86 @@ now_ms() {
 
 log() { if [ "$DRY" = 1 ]; then echo "${t:-?} $*"; else echo "$(now_ms) $*" >> "$LOG"; fi; }
 
+screen_off() {
+  dumpsys power 2>/dev/null | grep -qE "Display Power: state=OFF|mScreenState=OFF|mHoldingDisplaySuspendBlocker=false" && { echo 1; return; }
+  for f in /sys/class/backlight/*/brightness /sys/class/leds/lcd-backlight/brightness; do
+    [ -r "$f" ] && { read b < "$f"; [ "${b:-0}" = "0" ] && { echo 1; return; }; }
+  done
+  echo 0
+}
+
 keyguard_locked() {
   dumpsys window 2>/dev/null | grep -q "isKeyguardShowing=true" && echo 1 || echo 0
 }
 
+# 硬性安全：黑屏 / 锁屏 / 指纹使用期 -> 一律不执行
+blocked() {
+  [ "$(screen_off)" = 1 ] && { echo 1; return; }
+  [ "$(keyguard_locked)" = 1 ] && { echo 1; return; }
+  [ "$auth" = 1 ] || [ -f "$AUTH_FLAG" ] && { echo 1; return; }
+  echo 0
+}
+
 fire() { # fire <cmd> <name>
-  if [ -z "$1" ]; then log "  -> $2 (no action bound)"; EV="$EV$2 "; return; fi
+  [ -z "$1" ] && { log "  -> $2 (no action bound)"; return; }
+  if [ "$(blocked)" = 1 ]; then log "  -> $2 blocked (screen off / locked / fp auth)"; return; fi
   stat_acts=$(( stat_acts + 1 ))
   log "  -> $2: $1"
   [ "$DRY" = 1 ] && { EV="$EV$2 "; return; }
   ( sh -c "$1" >/dev/null 2>&1 & )
 }
 
-edge() { # edge <now_ms> - one IRQ edge; 按下/抬起 + 抬起必须被"安静"验证
+edge() { # edge <now_ms> - one IRQ edge
   t=$1
   stat_edges=$(( stat_edges + 1 ))
   gap=$(( t - last_edge )); [ "$last_edge" = 0 ] && gap=999999
   last_edge=$t
 
-  # --- 风暴过滤：密集边沿持续过久 = 指纹认证/扫描，不是人手势 ---
-  if [ "$gap" -lt "$QUIET_MS" ]; then
-    [ "$burst_start" = 0 ] && burst_start=$t
-    burst_edges=$(( burst_edges + 1 ))
-    if [ "$storm" = 0 ] && [ "$burst_edges" -ge "$STORM_MIN_EDGES" ] && [ $(( t - burst_start )) -ge "$STORM_SPAN_MS" ]; then
-      storm=1; touching=0; pending_release=0; suppress=$(( t + POST_STORM_MS ))
-      log "storm: ${burst_edges} edges over $(( t - burst_start ))ms (auth/scan?) - suppressing"
-    fi
-  else
-    if [ "$storm" = 1 ]; then
-      storm=0
-      suppress=$(( t + POST_STORM_MS ))
-      log "storm ended - cooling down ${POST_STORM_MS}ms (fingerprint was in use)"
-    fi
-    burst_start=0; burst_edges=1
+  # 解封判定：指纹识别完成 + 手指已抬起 + 冷却结束 -> 重新武装（吞掉解封那一刻的边沿）
+  if [ "$auth" = 1 ] && [ "$auth_release" = 1 ] && { [ "$suppress" = 0 ] || [ "$t" -ge "$suppress" ]; }; then
+    auth=0; auth_release=0; rm -f "$AUTH_FLAG" 2>/dev/null
+    touching=0; pending_release=0; pending_dur=0
+    log "fp auth done & finger lifted - re-armed"
+    return
   fi
-  [ "$storm" = 1 ] && return
-  [ "$swallow_next" = 1 ] && { swallow_next=0; log "swallowed edge after reset"; return; }
-  [ "$suppress" != 0 ] && [ "$t" -lt "$suppress" ] && { log "suppressed edge"; return; }
 
-  # --- 上一次的抬起还在等确认：若此刻又来了边沿 → 那个"抬起"是假的 ---
+  # 指纹识别中：累计密集边沿；一旦足够密集 -> 进入「指纹使用期」(auth=1)
+  if [ "$auth" = 0 ]; then
+    if [ "$gap" -lt "$QUIET_MS" ]; then
+      [ "$burst_start" = 0 ] && burst_start=$t
+      burst_edges=$(( burst_edges + 1 ))
+      if [ "$burst_edges" -ge "$STORM_MIN_EDGES" ] && [ $(( t - burst_start )) -ge "$STORM_SPAN_MS" ]; then
+        storm=1; touching=0; pending_release=0
+        auth=1; auth_release=0; touch "$AUTH_FLAG" 2>/dev/null
+        suppress=$(( t + POST_STORM_MS ))
+        log "storm/auth: ${burst_edges} edges over $(( t - burst_start ))ms (fingerprint in use) - suppressing"
+      fi
+      return
+    fi
+  fi
+
+  # 指纹使用期内：
+  #   - 仍密集(间隔小) -> 仍在指纹识别，吞掉
+  #   - 出现安静间隔(gap 大) -> 手指抬起（识别完成），进入冷却，但不解封；
+  #     若此前都没抬起过，则「手指从未离开」=本次抬起，合法；之后冷却结束才重新武装
+  if [ "$auth" = 1 ]; then
+    if [ "$gap" -lt "$QUIET_MS" ]; then
+      return
+    fi
+    auth_release=1
+    suppress=$(( t + POST_STORM_MS ))
+    log "fp auth: finger lifted - cooling ${POST_STORM_MS}ms (must wait before re-arm)"
+    return
+  fi
+
+  # 此处 gap>=QUIET_MS（未进入指纹期），正常手势处理
+  burst_start=0; burst_edges=1
+
+  # 冷却期内的边沿直接吞掉
+  if [ "$swallow_next" = 1 ]; then swallow_next=0; log "swallowed edge after reset"; return; fi
+  if [ "$suppress" != 0 ] && [ "$t" -lt "$suppress" ]; then log "suppressed edge (cooldown)"; return; fi
+
+  # 上一次的抬起还在等确认：若此刻又来了边沿 -> 那个"抬起"是假的
   if [ "$pending_release" != 0 ]; then
     log "release invalidated (edge ${gap}ms after release) - pair discarded"
     pending_release=0; pending_dur=0
@@ -118,13 +162,12 @@ edge() { # edge <now_ms> - one IRQ edge; 按下/抬起 + 抬起必须被"安静"
     return
   fi
 
-  # --- 按下 / 抬起 ---
+  # 按下 / 抬起
   if [ "$touching" = 0 ]; then
     if [ "$gap" -lt "$QUIET_MS" ]; then
       log "spurious edge (gap ${gap}ms) ignored"; return
     fi
     touching=1; down_ms=$t
-    if [ "$ONLY_UNLOCKED" = 1 ]; then ct_locked=$(keyguard_locked); else ct_locked=0; fi
   else
     dur=$(( t - down_ms )); touching=0
     pending_release=$t; pending_dur=$dur
@@ -134,22 +177,20 @@ edge() { # edge <now_ms> - one IRQ edge; 按下/抬起 + 抬起必须被"安静"
 
 confirm_release() { # confirm_release <dur>
   dur=$1
-  if [ "$dur" -le "$TAP_MAX_MS" ]; then
-    if [ "$ct_locked" = 1 ] && [ "$TAP_LOCKED" != 1 ]; then log "tap ${dur}ms ignored (locked)"
-    else log "tap ${dur}ms"; fire "$TAP_CMD" tap; fi
-  elif [ "$dur" -ge "$HOLD_MS" ] && [ "$dur" -le "$MAX_HOLD_MS" ]; then
-    if [ "$ct_locked" = 1 ] && [ "$HOLD_LOCKED" != 1 ]; then log "hold ${dur}ms ignored (locked)"
-    else log "hold ${dur}ms"; fire "$HOLD_CMD" hold; fi
-  elif [ "$dur" -gt "$MAX_HOLD_MS" ]; then
-    log "cancelled ${dur}ms (> ${MAX_HOLD_MS}ms - mis-touch)"
+  if [ "$dur" -lt "$HOLD_MIN_MS" ]; then
+    log "ignored ${dur}ms (< HOLD_MIN_MS ${HOLD_MIN_MS} - too short / was a touch)"
+  elif [ "$HOLD_MAX_MS" -gt "$HOLD_MIN_MS" ]; then
+    if [ "$dur" -le "$HOLD_MAX_MS" ]; then log "hold ${dur}ms"; fire "$HOLD_CMD" hold
+    else log "cancelled ${dur}ms (> HOLD_MAX_MS ${HOLD_MAX_MS} - mis-touch)"; fi
   else
-    log "dead zone ${dur}ms (${TAP_MAX_MS}~${HOLD_MS}) ignored"
+    # HOLD_MIN_MS == HOLD_MAX_MS：达到即触发（超过也执行）
+    log "hold ${dur}ms"; fire "$HOLD_CMD" hold
   fi
 }
 
 sample() { # sample <irq_count> <now_ms>
   cnt=$1; t=$2
-  # 双击已由 evdev 键码确认 → 抑制 IRQ 路径，避免把双击误判成轻触
+  # 双击已由 evdev 键码确认 -> 抑制 IRQ 路径，避免把双击误判成长按
   if [ -f "$DFLAG" ]; then
     exp=$(cat "$DFLAG" 2>/dev/null); rm -f "$DFLAG"
     case "$exp" in ''|*[!0-9]*) ;; *) if [ "$exp" -gt "$t" ]; then
@@ -164,8 +205,14 @@ sample() { # sample <irq_count> <now_ms>
     d=$pending_dur; pending_release=0; pending_dur=0
     confirm_release "$d"
   fi
+  # 指纹使用期解封（无新边沿也要能解封）：已看到抬起且冷却结束
+  if [ "$auth" = 1 ] && [ "$auth_release" = 1 ] && [ "$suppress" != 0 ] && [ "$t" -ge "$suppress" ]; then
+    auth=0; auth_release=0; rm -f "$AUTH_FLAG" 2>/dev/null
+    touching=0; pending_release=0; pending_dur=0
+    log "fp auth done & finger lifted - re-armed"
+  fi
   # 失配安全网
-  if [ "$touching" = 1 ] && [ $(( t - down_ms )) -gt $(( MAX_HOLD_MS + 500 )) ]; then
+  if [ "$touching" = 1 ] && [ $(( t - down_ms )) -gt 8000 ]; then
     log "state reset: down for $(( t - down_ms ))ms with no release (desync guard)"
     touching=0; swallow_next=1
   fi
@@ -196,11 +243,10 @@ double_watcher() { # 双击：系统出键码（evdev BTN_C），模块出功能
   getevent -lt "$dev" 2>/dev/null | while IFS= read -r line; do
     case "$line" in
       *"BTN_C"*"DOWN"*)
-        # 动作必须此刻从 config 现读：watcher 是后台子 shell，父 shell 热加载后的变量它看不到
+        # blocked() 会查 AUTH_FLAG / 黑屏 / 锁屏，故指纹识别中、熄屏、锁屏都不会触发
         dcmd=$(grep '^DOUBLE_CMD ' "$CONF" 2>/dev/null | head -1 | cut -d' ' -f2-)
         echo $(( $(now_ms) + SUPPRESS_MS )) > "$DFLAG"
-        if [ "$ONLY_UNLOCKED" = 1 ] && [ "$(keyguard_locked)" = 1 ]; then log "double ignored (locked)"
-        elif [ -n "$dcmd" ]; then log "double tap (BTN_C from HAL)"; fire "$dcmd" double
+        if [ -n "$dcmd" ]; then log "double tap (BTN_C from HAL)"; fire "$dcmd" double
         else log "double tap (BTN_C from HAL) - no DOUBLE_CMD set"; fi
         ;;
     esac
@@ -209,7 +255,7 @@ double_watcher() { # 双击：系统出键码（evdev BTN_C），模块出功能
 
 apply_native() {
   # 模块自己执行双击动作时，必须清掉系统原生绑定，否则一次双击会触发两个动作
-  [ -n "$DOUBLE_CMD" ] && NATIVE_DOUBLE=noop # 双击由本进程接管时，关掉系统原生绑定，避免一次双击触发两次
+  [ -n "$DOUBLE_CMD" ] && NATIVE_DOUBLE=noop
   [ "$NATIVE_DOUBLE" = "$prev_native" ] && return 0
   case "$NATIVE_DOUBLE" in
     noop)  # 占位：系统不认识这个函数名 -> 不动作；但设置非空 -> HAL 继续上报双击键码
@@ -229,7 +275,6 @@ run() {
   load
   apply_native
   # 防重复实例：两个守护进程会把手势动作触发两次（重复 = 双触发）
-  # ① pidfile 里那个若还活着，先请它退出（SIGTERM，1 秒后仍在就 SIGKILL）
   if [ -f "$PIDF" ]; then
     old=$(cat "$PIDF" 2>/dev/null)
     case "$old" in ''|*[!0-9]*) ;; *)
@@ -240,7 +285,6 @@ run() {
       fi ;;
     esac
   fi
-  # ② 再按字段精确扫一遍（只认「sh <本脚本绝对路径> run」三字段全等，避免误杀命令行含同样字样的 shell）
   for p in $(ps -A -o PID,ARGS 2>/dev/null | awk '$2=="sh" && $3 ~ /\/fpgesture\.sh$/ && $4=="run" { print $1 }'); do
     [ "$p" = "$$" ] && continue
     kill "$p" 2>/dev/null && log "killed duplicate daemon pid=$p"
@@ -248,7 +292,7 @@ run() {
     kill -0 "$p" 2>/dev/null && { kill -9 "$p" 2>/dev/null; log "duplicate pid=$p needed SIGKILL"; }
   done
   echo $$ > "$PIDF"
-  log "start tap<=${TAP_MAX_MS}ms hold=${HOLD_MS}-${MAX_HOLD_MS}ms double=${DOUBLE_MS}ms locked(t/h/d)=${TAP_LOCKED}/${HOLD_LOCKED}/${DOUBLE_LOCKED}"
+  log "start hold=${HOLD_MIN_MS}-${HOLD_MAX_MS}ms double=system-native(BTN_C) locked/screenoff/auth blocked"
   last_count=$(irq_count)
   [ -z "$last_count" ] && { log "FATAL: no '$IRQ_NAME' in $IRQ"; exit 1; }
   log "irq baseline=$last_count"
@@ -286,46 +330,65 @@ selftest() {
   DRY=1; ok=0; bad=0
   chk() { if [ "$2" = "$3" ]; then ok=$((ok+1)); else bad=$((bad+1)); echo "FAIL want='$2' got='$3'"; fi; }
   rst() { EV=""; touching=0; down_ms=0; suppress=0
-last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; pending_release=0; pending_dur=0; ct_locked=0; last_count=0; STUB_LOCKED=0; }
+    last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; pending_release=0; pending_dur=0
+    auth=0; auth_release=0; rm -f "$AUTH_FLAG" 2>/dev/null
+    last_count=0; STUB_LOCKED=0; STUB_OFF=0; }
   keyguard_locked() { echo "$STUB_LOCKED"; }
-  TAP_CMD=x; HOLD_CMD=x; DOUBLE_CMD=x
-  TAP_MAX_MS=800; HOLD_MS=1500; MAX_HOLD_MS=3000; DOUBLE_MS=400; SUPPRESS_MS=800
-  TAP_LOCKED=0; HOLD_LOCKED=0; DOUBLE_LOCKED=0
+  screen_off() { echo "$STUB_OFF"; }
+  HOLD_CMD=x; DOUBLE_CMD=
+  HOLD_MIN_MS=2000; HOLD_MAX_MS=3000; SUPPRESS_MS=800
+  POST_STORM_MS=2000; QUIET_MS=250; STORM_MIN_EDGES=3; STORM_SPAN_MS=400; POST_AUTH_MS=600
 
-  rst; sample 0 1000; sample 1 1020; sample 2 1120; sample 2 1600
-  chk "tap" "tap " "$EV"
+  # 区间内长按 -> 触发
+  rst; sample 1 1000; sample 2 1020; sample 3 3020; sample 3 3300
+  chk "hold in range" "hold " "$EV"
 
-  rst; sample 0 2000; sample 1 2020; sample 2 4020; sample 2 4400
-  chk "hold" "hold " "$EV"
+  # 太短（原本是轻触）-> 不执行
+  rst; sample 1 1000; sample 2 1020; sample 3 1500; sample 3 1800
+  chk "too short ignored" "" "$EV"
 
-  rst; sample 0 5000; sample 1 5020; sample 2 9020; sample 2 9500
+  # 太长（误触取消）-> 不执行
+  rst; sample 1 5000; sample 2 5020; sample 3 9020; sample 3 9500
   chk "too long cancelled" "" "$EV"
 
-  rst; sample 0 12000; sample 1 12020; sample 2 13020; sample 2 13500
-  chk "dead zone ignored" "" "$EV"
+  # 相等区间 2000=2000：>=2000 即触发
+  rst; HOLD_MIN_MS=2000; HOLD_MAX_MS=2000
+  sample 1 10000; sample 2 10020; sample 3 12020; sample 3 12300
+  chk "equal range fires at >=2000" "hold " "$EV"
 
-  # 现象①：认证风暴（密集且持续 >1.2s）→ 完全抑制，不得打出幻影双击
-  rst; i=0; while [ $i -lt 12 ]; do sample $((i+1)) $((30000 + i*150)); i=$((i+1)); done
+  # 黑屏 -> 不执行
+  rst; STUB_OFF=1
+  sample 1 1000; sample 2 1020; sample 3 3020; sample 3 3300
+  chk "screen off blocked" "" "$EV"
+
+  # 锁屏 -> 不执行
+  rst; STUB_LOCKED=1
+  sample 1 1000; sample 2 1020; sample 3 3020; sample 3 3300
+  chk "locked blocked" "" "$EV"
+
+  # 指纹认证风暴 -> 完全抑制，不得打出幻影
+  rst; sample 1 30000; sample 2 30150; sample 3 30300; sample 4 30450; sample 5 30600; sample 6 30750
   chk "auth storm suppressed" "" "$EV"
 
-  # 现象②：风暴后 2s 冷却期内不响应；冷却后再点必须正常（且不得被判成长按）
-  sample 13 32000; sample 14 32300; sample 14 34300
-  sample 15 36000; sample 16 36300; sample 16 38300
-  chk "cooldown swallows first touch, later tap works" "tap " "$EV"
+  # 风暴结束 + 手指抬起 + 冷却后，再来一次长按必须正常
+  rst; sample 1 30000; sample 2 30150; sample 3 30300; sample 4 30450; sample 5 30600
+  sample 6 31000            # 安静 gap -> 风暴结束 + 抬起(auth_release=1, 冷却到 33000)
+  sample 7 33200            # 冷却结束 -> 重新武装
+  sample 8 33500           # 新一次长按按下（gap>=250）
+  sample 9 35800           # 松手（dur=2300）
+  sample 9 36050           # 确认（quiet 250）
+  chk "after auth + finger lifted, hold works" "hold " "$EV"
 
-  # 双击交给系统原生（HAL 自己报 306）→ 我们不得出手
+  # 风暴结束(抬起)但仍在冷却/指纹使用期内 -> 不响应
+  rst; sample 1 50000; sample 2 50150; sample 3 50300; sample 4 50450; sample 5 50600
+  sample 6 51000           # 安静 -> 风暴结束 + 抬起(auth_release=1, 冷却到 53000)
+  sample 7 51500           # 冷却期内的一次新边沿 -> 必须被抑制
+  sample 8 51750
+  chk "auth-just-ended cooldown suppresses" "" "$EV"
+
+  # 双击交给系统原生（HAL 自己报 BTN_C）-> 我们不得出手
   rst; sample 1 6000; sample 2 6060; sample 3 6120; sample 4 6180; sample 4 7000
   chk "double-tap left to native" "" "$EV"
-
-  rst; STUB_LOCKED=1; sample 0 10000; sample 1 10020; sample 2 10120; sample 2 10400; sample 2 10800
-  chk "locked tap blocked" "" "$EV"
-
-  rst; STUB_LOCKED=1; TAP_LOCKED=1; sample 0 11000; sample 1 11020; sample 2 11120; sample 2 11400; sample 2 11800
-  TAP_LOCKED=0
-  chk "locked tap allowed" "tap " "$EV"
-
-  rst; STUB_LOCKED=1; sample 0 12000; sample 1 12020; sample 2 14020; sample 2 14400
-  chk "locked hold blocked" "" "$EV"
 
   echo "selftest: ok=$ok bad=$bad"
   [ "$bad" = 0 ]
