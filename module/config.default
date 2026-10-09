@@ -4,10 +4,11 @@ HOLD_CMD am start-foreground-service -a android.intent.action.ASSIST -n com.miui
 
 # Double-tap: handled by the system-native fingerprint_double_tap binding (HAL
 # reports BTN_C keycode 98). Leave DOUBLE_CMD empty so the module does NOT act;
-# the system keeps its own double-tap behavior. NATIVE_DOUBLE=off clears any
-# module-claimed native binding.
+# the system keeps its own double-tap behavior. NATIVE_DOUBLE=keep leaves the
+# system native binding untouched (do NOT use "off" — that would delete the
+# system binding and double-tap would stop working entirely).
 DOUBLE_CMD 
-NATIVE_DOUBLE off
+NATIVE_DOUBLE keep
 
 # Long-press window (ms). Release duration in [HOLD_MIN_MS, HOLD_MAX_MS] fires
 # the hold action. Set both equal (e.g. 2000 = 2000) to fire immediately at that

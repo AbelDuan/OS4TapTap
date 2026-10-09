@@ -73,7 +73,7 @@ setTimeout(() => {
       need(get('HOLD_MAX_MS') === '3500', 'HOLD_MAX_MS not saved: ' + get('HOLD_MAX_MS'));
       need(get('HOLD_CMD').startsWith('am start-foreground-service'), 'HOLD_CMD lost: ' + get('HOLD_CMD'));
       need(get('DOUBLE_CMD') === '', 'DOUBLE_CMD 应为空（双击交回系统）: ' + JSON.stringify(get('DOUBLE_CMD')));
-      need(get('NATIVE_DOUBLE') === 'off', 'NATIVE_DOUBLE 必须为 off（双击由系统原生处理）: ' + get('NATIVE_DOUBLE'));
+      need(get('NATIVE_DOUBLE') === 'keep', 'NATIVE_DOUBLE 必须为 keep（保留系统原生双击绑定）: ' + get('NATIVE_DOUBLE'));
       need(!txt.split('\n').some(l => l.startsWith('TAP_')), 'save 写回了 TAP_ 字段（单击未移除）');
       need(!txt.split('\n').some(l => l.startsWith('DOUBLE_MS ')), 'save 写回了 DOUBLE_MS 字段');
     }

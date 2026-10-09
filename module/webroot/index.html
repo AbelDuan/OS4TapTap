@@ -266,7 +266,7 @@ function render() {
   for (const g of GESTURES) {
     const k = g.k;
     $('pk_' + k).onclick = () => openSheet('选择「' + g.name + '」的动作',
-      ACTIONS_FOR(k).map(a => ({ label:a[1], value:a[0] })), it => { S[k].type = it.value; sync(); },
+      ACTIONS.map(a => ({ label:a[1], value:a[0] })), it => { S[k].type = it.value; sync(); },
       { selected: S[k].type });
     $('val_' + k).oninput = e => { S[k].value = e.target.value; };
     $('sel_' + k).onclick = () => openSheet('选择应用',
