@@ -77,7 +77,11 @@ now_ms() {
 log() { if [ "$DRY" = 1 ]; then echo "${t:-?} $*"; else echo "$(now_ms) $*" >> "$LOG"; fi; }
 
 screen_off() {
-  dumpsys power 2>/dev/null | grep -qE "Display Power: state=OFF|mScreenState=OFF|mHoldingDisplaySuspendBlocker=false" && { echo 1; return; }
+  # 主判据：Display Power 状态。mWakefulness=Dozing 是息屏显示(AOD)状态，屏幕仍在显示内容
+  # 不算黑屏；Asleep 才是真黑屏。mHoldingDisplaySuspendBlocker 在 AOD/亮屏下会误报，不用。
+  dumpsys power 2>/dev/null | grep -qE "Display Power: state=OFF|mScreenState=OFF|mWakefulness=Asleep" && { echo 1; return; }
+  # 背光为 0：仅当 dumpsys 未给出明确 ON 时才辅助判断；AOD 场景不靠背光判黑屏。
+  dumpsys power 2>/dev/null | grep -qE "Display Power: state=ON|mScreenState=ON|mWakefulness=Awake" && { echo 0; return; }
   for f in /sys/class/backlight/*/brightness /sys/class/leds/lcd-backlight/brightness; do
     [ -r "$f" ] && { read b < "$f"; [ "${b:-0}" = "0" ] && { echo 1; return; }; }
   done
@@ -85,7 +89,11 @@ screen_off() {
 }
 
 keyguard_locked() {
-  dumpsys window 2>/dev/null | grep -q "isKeyguardShowing=true" && echo 1 || echo 0
+  # 小米 HyperOS：解锁后 isKeyguardShowing 可能仍为 true（keyguard 窗口残留），
+  # 但 isKeyguardOccluded=true 表示已被内容遮住（实际已解锁可见）-> 不算锁。
+  dumpsys window 2>/dev/null | grep -q "isKeyguardShowing=true" || { echo 0; return; }
+  dumpsys window 2>/dev/null | grep -q "isKeyguardOccluded=true" && { echo 0; return; }
+  echo 1
 }
 
 # 硬性安全：黑屏 / 锁屏 / 指纹使用期（瞬时，仅在冷却窗内）-> 一律不执行
@@ -98,7 +106,10 @@ blocked() {
 
 fire() { # fire <cmd> <name>
   [ -z "$1" ] && { log "  -> $2 (no action bound)"; return; }
-  if [ "$(blocked)" = 1 ]; then log "  -> $2 blocked (screen off / locked / fp auth)"; return; fi
+  # 硬性安全：黑屏 / 锁屏 / 指纹使用期 -> 一律不执行；逐项打印拦因，便于定位
+  if [ "$(screen_off)" = 1 ]; then log "  -> $2 blocked (screen OFF)"; return; fi
+  if [ "$(keyguard_locked)" = 1 ]; then log "  -> $2 blocked (KEYGUARD locked)"; return; fi
+  if [ "$auth" = 1 ]; then log "  -> $2 blocked (fp auth in progress)"; return; fi
   stat_acts=$(( stat_acts + 1 ))
   log "  -> $2: $1"
   [ "$DRY" = 1 ] && { EV="$EV$2 "; return; }
