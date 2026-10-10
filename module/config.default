@@ -29,8 +29,11 @@ QUIET_MS 250
 # 边沿被吞导致长按永远失效）。
 STORM_MIN_EDGES 10
 STORM_SPAN_MS 400
-SETTLE_MS 700
 POST_STORM_MS 2000
-POST_AUTH_MS 600
 FP_EVDEV_NAME uinput-xiaomi
 POLL 0.05
+
+# 事件日志开关：0=关闭（默认）。关闭时守护进程不读 /proc/uptime、不写 events.log，
+# 零日志开销（长按/双击检测本身仍照常工作）。排查问题时设为 1 并重启守护进程，
+# 事件会写入 /data/adb/fpgesture/events.log（含每个手势的识别/触发/拦截原因）。
+LOG_ENABLED 0

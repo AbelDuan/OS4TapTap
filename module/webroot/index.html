@@ -86,6 +86,7 @@
 
 <button id="save">保存并生效</button>
 <button class="ghost" id="restart">重启守护进程</button>
+<label class="inline"><input type="checkbox" id="logEnabled"> 事件日志（排查时开，平时关）</label>
 
 <div class="card" style="margin-top:12px">
   <h2>最近识别 <span class="badge">每 2 秒刷新</span></h2>
@@ -218,10 +219,11 @@ function parseCfg(txt) {
     hold: g('hold'), double: g('double'),
     nativeDouble: nat,
     quietMs: +kv.QUIET_MS || 250, stormMinEdges: +kv.STORM_MIN_EDGES || 3,
-    stormSpanMs: +kv.STORM_SPAN_MS || 400, settleMs: +kv.SETTLE_MS || 700,
+    stormSpanMs: +kv.STORM_SPAN_MS || 400,
     postStormMs: +kv.POST_STORM_MS || 2000,
     fpEvdevName: kv.FP_EVDEV_NAME || 'uinput-xiaomi',
     holdMinMs: +kv.HOLD_MIN_MS || 2000, holdMaxMs: +kv.HOLD_MAX_MS || 3000,
+    logEnabled: kv.LOG_ENABLED === '1' ? 1 : 0,
   };
 }
 function buildCfg(s) {
@@ -235,10 +237,10 @@ function buildCfg(s) {
     'QUIET_MS ' + s.quietMs,
     'STORM_MIN_EDGES ' + s.stormMinEdges,
     'STORM_SPAN_MS ' + s.stormSpanMs,
-    'SETTLE_MS ' + s.settleMs,
     'POST_STORM_MS ' + s.postStormMs,
     'FP_EVDEV_NAME ' + s.fpEvdevName,
     'POLL 0.05',
+    'LOG_ENABLED ' + (s.logEnabled ? 1 : 0),
     'HOLD_LOCKED ' + (s.hold.locked ? 1 : 0),
     'DOUBLE_LOCKED ' + (s.double.locked ? 1 : 0),
     'NATIVE_DOUBLE ' + (s.nativeDouble || 'keep'),
@@ -287,6 +289,7 @@ function sync() {
     $('sel_' + k).style.display = t === 'app' ? 'block' : 'none';
   }
   $('holdMinMs').value = S.holdMinMs; $('holdMaxMs').value = S.holdMaxMs;
+  $('logEnabled').checked = S.logEnabled === 1;
   $('cfg').textContent = buildCfg(S);
 }
 function setStatus(msg, bad) { const el = $('st'); if (el) { el.textContent = msg; el.className = 'badge ' + (bad ? 'bad' : 'ok'); } }
@@ -325,6 +328,7 @@ async function poll() {
 $('save').onclick = async () => {
   S.holdMinMs = +$('holdMinMs').value || 2000;
   S.holdMaxMs = +$('holdMaxMs').value || 3000;
+  S.logEnabled = $('logEnabled').checked ? 1 : 0;
   const txt = buildCfg(S);
   const r = await sh('echo ' + b64(txt) + ' | base64 -d > ' + CONF + ' && echo saved');
   if (r.stdout.indexOf('saved') >= 0) { toast('已保存，约 2 秒生效'); $('cfg').textContent = txt; }

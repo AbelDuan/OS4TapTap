@@ -32,9 +32,10 @@ FP_EVDEV_NAME=${FPGESTURE_EVDEV_NAME:-uinput-xiaomi}
 
 HOLD_CMD=""; DOUBLE_CMD=""
 HOLD_MIN_MS=2000; HOLD_MAX_MS=3000; SUPPRESS_MS=800; POLL=0.05
-QUIET_MS=250; STORM_MIN_EDGES=10; STORM_SPAN_MS=400; SETTLE_MS=700; POST_STORM_MS=2000; POST_AUTH_MS=600
+QUIET_MS=250; STORM_MIN_EDGES=10; STORM_SPAN_MS=400; POST_STORM_MS=2000
 MEASURE_OFFSET=60              # 采样量化补偿：实测 2s 长按只读出 ~1985ms（50ms 轮询误差），补偿后回到真实时长
 NATIVE_DOUBLE=keep; prev_native=
+LOG_ENABLED=0                  # 事件日志开关：0=关闭（默认，零日志开销），1=写入 events.log
 
 DRY=0; EV=""
 touching=0; down_ms=0; suppress=0
@@ -58,10 +59,9 @@ load() {
       QUIET_MS)      QUIET_MS=${val:-250} ;;
       STORM_MIN_EDGES) STORM_MIN_EDGES=${val:-10} ;;
       STORM_SPAN_MS) STORM_SPAN_MS=${val:-700} ;;
-      SETTLE_MS)     SETTLE_MS=${val:-700} ;;
       POST_STORM_MS) POST_STORM_MS=${val:-2000} ;;
-      POST_AUTH_MS)  POST_AUTH_MS=${val:-600} ;;
       MEASURE_OFFSET) MEASURE_OFFSET=${val:-60} ;;
+      LOG_ENABLED)     LOG_ENABLED=${val:-0} ;;
       FP_EVDEV_NAME) FP_EVDEV_NAME=${val:-uinput-xiaomi} ;;
       NATIVE_DOUBLE) NATIVE_DOUBLE=${val:-keep} ;;
     esac
@@ -74,14 +74,21 @@ now_ms() {
   echo $(( i * 1000 + ${f}00 / 100 ))
 }
 
-log() { if [ "$DRY" = 1 ]; then echo "${t:-?} $*"; else echo "$(now_ms) $*" >> "$LOG"; fi; }
+# 日志：DRY（selftest/replay）时打印到 stdout；实机默认关闭（LOG_ENABLED=0），
+# 打开时才读 /proc/uptime 并写 events.log——关闭时零额外开销。
+log() {
+  if [ "$DRY" = 1 ]; then echo "${t:-?} $*"
+  elif [ "$LOG_ENABLED" = 1 ]; then echo "$(now_ms) $*" >> "$LOG"
+  fi
+}
 
 screen_off() {
   # 主判据：Display Power 状态。mWakefulness=Dozing 是息屏显示(AOD)状态，屏幕仍在显示内容
   # 不算黑屏；Asleep 才是真黑屏。mHoldingDisplaySuspendBlocker 在 AOD/亮屏下会误报，不用。
-  dumpsys power 2>/dev/null | grep -qE "Display Power: state=OFF|mScreenState=OFF|mWakefulness=Asleep" && { echo 1; return; }
-  # 背光为 0：仅当 dumpsys 未给出明确 ON 时才辅助判断；AOD 场景不靠背光判黑屏。
-  dumpsys power 2>/dev/null | grep -qE "Display Power: state=ON|mScreenState=ON|mWakefulness=Awake" && { echo 0; return; }
+  # 一次 dumpsys 抓全部字段（避免每次手势跑 2 次 binder dump）。
+  pw=$(dumpsys power 2>/dev/null)
+  echo "$pw" | grep -qE "Display Power: state=OFF|mScreenState=OFF|mWakefulness=Asleep" && { echo 1; return; }
+  echo "$pw" | grep -qE "Display Power: state=ON|mScreenState=ON|mWakefulness=Awake" && { echo 0; return; }
   for f in /sys/class/backlight/*/brightness /sys/class/leds/lcd-backlight/brightness; do
     [ -r "$f" ] && { read b < "$f"; [ "${b:-0}" = "0" ] && { echo 1; return; }; }
   done
@@ -91,8 +98,10 @@ screen_off() {
 keyguard_locked() {
   # 小米 HyperOS：解锁后 isKeyguardShowing 可能仍为 true（keyguard 窗口残留），
   # 但 isKeyguardOccluded=true 表示已被内容遮住（实际已解锁可见）-> 不算锁。
-  dumpsys window 2>/dev/null | grep -q "isKeyguardShowing=true" || { echo 0; return; }
-  dumpsys window 2>/dev/null | grep -q "isKeyguardOccluded=true" && { echo 0; return; }
+  # 一次 dumpsys 抓两个字段。
+  w=$(dumpsys window 2>/dev/null)
+  echo "$w" | grep -q "isKeyguardShowing=true" || { echo 0; return; }
+  echo "$w" | grep -q "isKeyguardOccluded=true" && { echo 0; return; }
   echo 1
 }
 
@@ -259,23 +268,25 @@ apply_native() {
   #   - DOUBLE_CMD 非空：模块自己执行双击动作 -> 必须把系统原生绑定覆盖成占位名，
   #     否则系统会再触发一次（一次双击触发两次）。
   #   - DOUBLE_CMD 为空（默认）：双击完全交给系统原生。若此前被我们写成了占位名
-  #     (fpgesture_noop) 或曾用 off 删掉(读到空)，这里自愈恢复成系统默认(turn_on_torch)，
-  #     这样升级/改回配置后双击立刻恢复可用，不会被卡死在"无绑定"状态。
-  if [ -n "$DOUBLE_CMD" ]; then
+  #     (fpgesture_noop) 或曾用 off 删掉(读到空)，这里自愈恢复成系统默认(turn_on_torch)。
+  # 性能：只在状态切换时跑 settings（binder 调用）；状态不变则零开销。
+  want=keep
+  [ -n "$DOUBLE_CMD" ] && want=noop
+  [ "$want" = "$prev_native" ] && return 0
+  if [ "$want" = noop ]; then
     cur=$(settings get system fingerprint_double_tap 2>/dev/null)
     if [ "$cur" != "$DUMMY_FN" ]; then
       settings put system fingerprint_double_tap "$DUMMY_FN" 2>/dev/null \
         && log "native double-tap = dummy '$DUMMY_FN' (module handles double via evdev)"
     fi
-    prev_native=noop
   else
     cur=$(settings get system fingerprint_double_tap 2>/dev/null)
     if [ "$cur" = "$DUMMY_FN" ] || [ -z "$cur" ]; then
       settings put system fingerprint_double_tap turn_on_torch 2>/dev/null \
         && log "native double-tap restored to system default (turn_on_torch) - 双击交系统原生"
     fi
-    prev_native=keep
   fi
+  prev_native=$want
 }
 
 run() {
@@ -343,7 +354,7 @@ selftest() {
   screen_off() { echo "$STUB_OFF"; }
   HOLD_CMD=x; DOUBLE_CMD=
   HOLD_MIN_MS=2000; HOLD_MAX_MS=3000; SUPPRESS_MS=800; MEASURE_OFFSET=60
-  POST_STORM_MS=2000; QUIET_MS=250; STORM_MIN_EDGES=10; STORM_SPAN_MS=400; POST_AUTH_MS=600
+  POST_STORM_MS=2000; QUIET_MS=250; STORM_MIN_EDGES=10; STORM_SPAN_MS=400
 
   # 区间内长按 -> 触发（实测 2s 长按读 ~1985ms，+60 补偿后过 2000 阈值）
   rst; sample 1 1000; sample 2 1020; sample 3 3020; sample 3 3300
