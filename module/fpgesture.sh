@@ -142,15 +142,24 @@ edge() { # edge <now_ms> - one IRQ edge
     # 不 return、不改 touching：继续走下方正常手势处理
   fi
 
-  # 认证风暴检测：仅供「双击」fire 拦截参考（auth 置 1 后由 sample() 定时解除，
-  # 不依赖 suppress、不吞 IRQ 边沿、不改 touching——长按识别不受任何影响）。
+  # 认证风暴检测：仅供「双击」fire 拦截参考（auth 置 1 后由 sample() 定时解除）。
+  # 不吞 IRQ 边沿——尤其"刚结束一次指纹触摸"后立刻长按：认证的余波边沿会把
+  # last_edge 推进到很新，若长按按下边沿 gap<QUIET 就被静默吞掉，按下状态丢失
+  # 导致长按识别成 0ms/短触。这里先把边沿当作可能的按下（设 touching/down_ms），
+  # 只有 burst 达到认证风暴阈值才撤销（认证本身不构成长按）。
   if [ "$gap" -lt "$QUIET_MS" ]; then
     [ "$burst_start" = 0 ] && burst_start=$t
     burst_edges=$(( burst_edges + 1 ))
+    if [ "$touching" = 0 ]; then
+      touching=1; down_ms=$t; last_activity=$t
+    else
+      last_activity=$t
+    fi
     if [ "$burst_edges" -ge "$STORM_MIN_EDGES" ] && [ $(( t - burst_start )) -ge "$STORM_SPAN_MS" ]; then
       storm=1
       auth=1; auth_expire=$(( t + POST_STORM_MS ))
       log "storm/auth: ${burst_edges} edges over $(( t - burst_start ))ms (fingerprint in use)"
+      touching=0; down_ms=0; last_activity=0    # 认证风暴：撤销误设的按下
     fi
     return
   fi
@@ -392,21 +401,22 @@ selftest() {
   rst; sample 1 30000; sample 2 30150; sample 3 30300; sample 4 30450; sample 5 30600; sample 6 30750
   sample 7 30900; sample 8 31050; sample 9 31200; sample 10 31350; sample 11 31500; sample 12 31650
   # 风暴起点 ~31350，冷却到 31350+2000=33350；之后新一次长按必须正常
-  sample 13 34000          # 安静 gap -> 冷却窗已结束，重新武装
-  sample 14 34300          # 新一次长按按下（gap>=250）
-  sample 15 36600          # 松手（dur=2300，+60=2360 过 2000）
-  sample 15 36850          # 确认（quiet 250）
+  sample 12 34000          # cnt 不变：仅推进时间触发 auth 解除（无新边沿）
+  sample 13 34300          # 新一次长按按下（gap>=250）
+  sample 14 36600          # 松手（dur=2300，+60=2360 过 2000）
+  sample 14 36850          # 确认（quiet 250）
   chk "after auth cooldown, hold works" "hold " "$EV"
 
-  # 真实长按场景：先按下（大 gap）-> 认证风暴（密集边沿，auth=1）-> 松手（大 gap）。
-  # auth 只拦双击，不得影响长按；风暴边沿不得触碰 touching/down_ms。
-  rst; sample 1 50000          # 长按按下（gap 大 -> touching=1, down_ms=50000）
-  sample 2 50150; sample 3 50300; sample 4 50450; sample 5 50600; sample 6 50750
+  # 真实用户场景（本次修复核心）：刚结束一次指纹触摸（认证风暴，余波边沿把
+  # last_edge 推进到很新）-> 立刻长按，按下边沿 gap<QUIET 也可能被当作余波。
+  # 必须仍能识别长按（认证结束后手指已离开，auth 窗内长按按下要能捕获）。
+  rst; sample 1 50000; sample 2 50150; sample 3 50300; sample 4 50450; sample 5 50600; sample 6 50750
   sample 7 50900; sample 8 51050; sample 9 51200; sample 10 51350; sample 11 51500; sample 12 51650
-  # 风暴触发 auth=1（auth_expire=51650+2000=53650），但不碰 touching（仍=1, down_ms=50000）
-  sample 13 54300             # 松手（gap 大，dur=4300，+60=4360 过 2000）
-  sample 13 54550             # 确认（quiet 250）
-  chk "hold fires even during auth window" "hold " "$EV"
+  # 风暴触发 auth=1 并撤销误设的按下（touching=0）
+  sample 13 51900             # 认证余波/长按按下（gap=250 恰达阈值，走正常路径 -> 按下）
+  sample 14 54300             # 松手（dur=2400，+60=2460 过 2000）
+  sample 14 54550             # 确认（quiet 250）
+  chk "hold right after fp auth still fires" "hold " "$EV"
 
   # 双击交给系统原生（HAL 自己报 BTN_C）-> 我们不得出手
   rst; sample 1 6000; sample 2 6060; sample 3 6120; sample 4 6180; sample 4 7000

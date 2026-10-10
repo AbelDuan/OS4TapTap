@@ -1,0 +1,10 @@
+# Android shell 脚本/配置必须保持 LF——CRLF 会在设备 sh 上跑挂（\r 被当命令）
+*.sh text eol=lf
+*.prop text eol=lf
+*.default text eol=lf
+*.html text eol=lf
+*.js text eol=lf
+*.md text eol=lf
+# 二进制与压缩包不做行尾转换
+*.zip binary
+*.png binary
