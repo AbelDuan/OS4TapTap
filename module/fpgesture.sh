@@ -32,7 +32,7 @@ FP_EVDEV_NAME=${FPGESTURE_EVDEV_NAME:-uinput-xiaomi}
 
 HOLD_CMD=""; DOUBLE_CMD=""
 HOLD_MIN_MS=2000; HOLD_MAX_MS=3000; SUPPRESS_MS=800; POLL=0.05
-QUIET_MS=250; STORM_MIN_EDGES=3; STORM_SPAN_MS=400; SETTLE_MS=700; POST_STORM_MS=2000; POST_AUTH_MS=600
+QUIET_MS=250; STORM_MIN_EDGES=10; STORM_SPAN_MS=400; SETTLE_MS=700; POST_STORM_MS=2000; POST_AUTH_MS=600
 MEASURE_OFFSET=60              # 采样量化补偿：实测 2s 长按只读出 ~1985ms（50ms 轮询误差），补偿后回到真实时长
 NATIVE_DOUBLE=keep; prev_native=
 
@@ -40,7 +40,7 @@ DRY=0; EV=""
 touching=0; down_ms=0; suppress=0
 last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; pending_release=0; pending_dur=0
 last_count=0; stat_edges=0; stat_acts=0
-auth=0                         # 指纹使用期：瞬时记忆，仅冷却窗内有效，超时自动解除（不落盘，不会卡死）
+auth=0; auth_expire=0             # 指纹使用期：瞬时记忆，仅冷却窗内有效，超时自动解除（不落盘，不会卡死）
 watcher_pid=""
 
 load() {
@@ -56,7 +56,7 @@ load() {
       SUPPRESS_MS)   SUPPRESS_MS=${val:-800} ;;
       POLL)          POLL=${val:-0.05} ;;
       QUIET_MS)      QUIET_MS=${val:-250} ;;
-      STORM_MIN_EDGES) STORM_MIN_EDGES=${val:-4} ;;
+      STORM_MIN_EDGES) STORM_MIN_EDGES=${val:-10} ;;
       STORM_SPAN_MS) STORM_SPAN_MS=${val:-700} ;;
       SETTLE_MS)     SETTLE_MS=${val:-700} ;;
       POST_STORM_MS) POST_STORM_MS=${val:-2000} ;;
@@ -104,12 +104,14 @@ blocked() {
   echo 0
 }
 
-fire() { # fire <cmd> <name>
+fire() { # fire <cmd> <name>   [name: hold | double]
   [ -z "$1" ] && { log "  -> $2 (no action bound)"; return; }
-  # 硬性安全：黑屏 / 锁屏 / 指纹使用期 -> 一律不执行；逐项打印拦因，便于定位
+  # 硬性安全：黑屏 / 锁屏 -> 一律不执行（含长按）。逐项打印拦因，便于定位。
   if [ "$(screen_off)" = 1 ]; then log "  -> $2 blocked (screen OFF)"; return; fi
   if [ "$(keyguard_locked)" = 1 ]; then log "  -> $2 blocked (KEYGUARD locked)"; return; fi
-  if [ "$auth" = 1 ]; then log "  -> $2 blocked (fp auth in progress)"; return; fi
+  # 指纹使用期(auth)：只拦双击（指纹解锁时摸键弹两下=误触风险高）。
+  # 长按不拦——长按是用户主动持续按压，物理上必然触发指纹认证，若拦则长按永远失效。
+  if [ "$2" = double ] && [ "$auth" = 1 ]; then log "  -> double blocked (fp auth in progress)"; return; fi
   stat_acts=$(( stat_acts + 1 ))
   log "  -> $2: $1"
   [ "$DRY" = 1 ] && { EV="$EV$2 "; return; }
@@ -122,27 +124,24 @@ edge() { # edge <now_ms> - one IRQ edge
   gap=$(( t - last_edge )); [ "$last_edge" = 0 ] && gap=999999
   last_edge=$t
 
-  # 指纹使用期：在冷却窗内 -> 持续密集则延长冷却，否则到窗即自动解除（不落盘，不会卡死）
+  # auth 期间：不吞 IRQ 边沿、不改 touching——长按识别不受任何影响。
+  # auth 只用于「双击」fire 拦截；解除由 sample() 按 auth_expire 定时处理。
   if [ "$auth" = 1 ]; then
     if [ "$gap" -lt "$QUIET_MS" ]; then
-      suppress=$(( t + POST_STORM_MS ))        # 仍密集：往后延冷却
+      auth_expire=$(( t + POST_STORM_MS ))     # 仍密集：往后延（供双击拦截参考）
     fi
-    if { [ "$suppress" = 0 ] || [ "$t" -ge "$suppress" ]; }; then
-      auth=0; touching=0; pending_release=0; pending_dur=0
-      log "fp auth window expired - re-armed"
-      return
-    fi
-    return                                     # 冷却窗内：吞掉一切（含指纹识别中）
+    # 不 return、不改 touching：继续走下方正常手势处理
   fi
 
-  # 指纹识别中：累计密集边沿；足够密集 -> 进入「指纹使用期」(auth=1)，开冷却窗
+  # 认证风暴检测：仅供「双击」fire 拦截参考（auth 置 1 后由 sample() 定时解除，
+  # 不依赖 suppress、不吞 IRQ 边沿、不改 touching——长按识别不受任何影响）。
   if [ "$gap" -lt "$QUIET_MS" ]; then
     [ "$burst_start" = 0 ] && burst_start=$t
     burst_edges=$(( burst_edges + 1 ))
     if [ "$burst_edges" -ge "$STORM_MIN_EDGES" ] && [ $(( t - burst_start )) -ge "$STORM_SPAN_MS" ]; then
-      storm=1; touching=0; pending_release=0
-      auth=1; suppress=$(( t + POST_STORM_MS ))
-      log "storm/auth: ${burst_edges} edges over $(( t - burst_start ))ms (fingerprint in use) - suppressing"
+      storm=1
+      auth=1; auth_expire=$(( t + POST_STORM_MS ))
+      log "storm/auth: ${burst_edges} edges over $(( t - burst_start ))ms (fingerprint in use)"
     fi
     return
   fi
@@ -192,6 +191,12 @@ confirm_release() { # confirm_release <dur>
 
 sample() { # sample <irq_count> <now_ms>
   cnt=$1; t=$2
+  # 指纹使用期独立定时解除：按 auth_expire，不依赖新边沿（否则用户停手后 auth
+  # 永久卡死）。解除时保留 touching——用户可能正按着做长按，不能破坏按下状态。
+  if [ "$auth" = 1 ] && [ "$t" -ge "$auth_expire" ]; then
+    auth=0; burst_start=0; burst_edges=0
+    log "fp auth window expired - re-armed (idle)"
+  fi
   # 双击已由 evdev 键码确认 -> 抑制 IRQ 路径，避免把双击误判成长按
   if [ -f "$DFLAG" ]; then
     exp=$(cat "$DFLAG" 2>/dev/null); rm -f "$DFLAG"
@@ -333,12 +338,12 @@ selftest() {
   chk() { if [ "$2" = "$3" ]; then ok=$((ok+1)); else bad=$((bad+1)); echo "FAIL want='$2' got='$3'"; fi; }
   rst() { EV=""; touching=0; down_ms=0; suppress=0
     last_edge=0; burst_start=0; burst_edges=0; storm=0; swallow_next=0; pending_release=0; pending_dur=0
-    auth=0; last_count=0; STUB_LOCKED=0; STUB_OFF=0; }
+    auth=0; auth_expire=0; last_count=0; STUB_LOCKED=0; STUB_OFF=0; }
   keyguard_locked() { echo "$STUB_LOCKED"; }
   screen_off() { echo "$STUB_OFF"; }
   HOLD_CMD=x; DOUBLE_CMD=
   HOLD_MIN_MS=2000; HOLD_MAX_MS=3000; SUPPRESS_MS=800; MEASURE_OFFSET=60
-  POST_STORM_MS=2000; QUIET_MS=250; STORM_MIN_EDGES=3; STORM_SPAN_MS=400; POST_AUTH_MS=600
+  POST_STORM_MS=2000; QUIET_MS=250; STORM_MIN_EDGES=10; STORM_SPAN_MS=400; POST_AUTH_MS=600
 
   # 区间内长按 -> 触发（实测 2s 长按读 ~1985ms，+60 补偿后过 2000 阈值）
   rst; sample 1 1000; sample 2 1020; sample 3 3020; sample 3 3300
@@ -367,25 +372,30 @@ selftest() {
   sample 1 1000; sample 2 1020; sample 3 3020; sample 3 3300
   chk "locked blocked" "" "$EV"
 
-  # 指纹认证风暴 -> 完全抑制，不得打出幻影
+  # 指纹认证风暴（≥10 密集边沿且跨 400ms）-> 完全抑制，不得打出幻影
   rst; sample 1 30000; sample 2 30150; sample 3 30300; sample 4 30450; sample 5 30600; sample 6 30750
+  sample 7 30900; sample 8 31050; sample 9 31200; sample 10 31350; sample 11 31500; sample 12 31650
   chk "auth storm suppressed" "" "$EV"
 
   # 风暴后冷却窗（POST_STORM_MS 从风暴起点算起）结束，再来一次长按必须正常
-  rst; sample 1 30000; sample 2 30150; sample 3 30300; sample 4 30450; sample 5 30600
-  # 风暴起点 ~30600，冷却到 30600+2000=32600；之后新一次长按必须正常
-  sample 6 33000           # 安静 gap -> 冷却窗已结束，重新武装
-  sample 7 33300           # 新一次长按按下（gap>=250）
-  sample 8 35600           # 松手（dur=2300，+60=2360 过 2000）
-  sample 8 35850           # 确认（quiet 250）
+  rst; sample 1 30000; sample 2 30150; sample 3 30300; sample 4 30450; sample 5 30600; sample 6 30750
+  sample 7 30900; sample 8 31050; sample 9 31200; sample 10 31350; sample 11 31500; sample 12 31650
+  # 风暴起点 ~31350，冷却到 31350+2000=33350；之后新一次长按必须正常
+  sample 13 34000          # 安静 gap -> 冷却窗已结束，重新武装
+  sample 14 34300          # 新一次长按按下（gap>=250）
+  sample 15 36600          # 松手（dur=2300，+60=2360 过 2000）
+  sample 15 36850          # 确认（quiet 250）
   chk "after auth cooldown, hold works" "hold " "$EV"
 
-  # 风暴后仍在冷却窗内 -> 不响应
-  rst; sample 1 50000; sample 2 50150; sample 3 50300; sample 4 50450; sample 5 50600
-  sample 6 51000           # 风暴起点 ~50600，冷却到 52600；此处仍在窗内
-  sample 7 51500           # 冷却期内的一次新边沿 -> 必须被抑制
-  sample 8 51750
-  chk "auth cooldown window suppresses" "" "$EV"
+  # 真实长按场景：先按下（大 gap）-> 认证风暴（密集边沿，auth=1）-> 松手（大 gap）。
+  # auth 只拦双击，不得影响长按；风暴边沿不得触碰 touching/down_ms。
+  rst; sample 1 50000          # 长按按下（gap 大 -> touching=1, down_ms=50000）
+  sample 2 50150; sample 3 50300; sample 4 50450; sample 5 50600; sample 6 50750
+  sample 7 50900; sample 8 51050; sample 9 51200; sample 10 51350; sample 11 51500; sample 12 51650
+  # 风暴触发 auth=1（auth_expire=51650+2000=53650），但不碰 touching（仍=1, down_ms=50000）
+  sample 13 54300             # 松手（gap 大，dur=4300，+60=4360 过 2000）
+  sample 13 54550             # 确认（quiet 250）
+  chk "hold fires even during auth window" "hold " "$EV"
 
   # 双击交给系统原生（HAL 自己报 BTN_C）-> 我们不得出手
   rst; sample 1 6000; sample 2 6060; sample 3 6120; sample 4 6180; sample 4 7000

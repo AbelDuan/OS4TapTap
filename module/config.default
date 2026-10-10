@@ -23,7 +23,11 @@ HOLD_MAX_MS 3000
 #   - 指纹识别完成后，手指若从未离开过按钮 -> 不识别
 SUPPRESS_MS 800
 QUIET_MS 250
-STORM_MIN_EDGES 3
+# 认证风暴判定：边沿数须达 STORM_MIN_EDGES 且跨 STORM_SPAN_MS。真实指纹认证会产生
+# 几十个密集边沿；而长按仅 2 个边沿（按下+抬起）、双击约 4 个。阈值设 10 让手势
+# 永远不会被误判成"指纹认证风暴"而被吞（v1.13 的 3 太敏感，长按被误判为认证、
+# 边沿被吞导致长按永远失效）。
+STORM_MIN_EDGES 10
 STORM_SPAN_MS 400
 SETTLE_MS 700
 POST_STORM_MS 2000
